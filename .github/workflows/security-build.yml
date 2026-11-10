@@ -20,9 +20,28 @@ jobs:
           java-version: '17'
       - name: Install Android toolchain
         run: |
-          sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;27.3.13750724"
-          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          set -euo pipefail
+          sdk="$RUNNER_TEMP/android-sdk"
+          tools="$sdk/cmdline-tools"
+          archive="$RUNNER_TEMP/android-command-line-tools.zip"
+          mkdir -p "$tools"
+          curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 \
+            https://dl.google.com/android/repository/commandlinetools-linux-11479570_latest.zip \
+            -o "$archive"
+          printf '%s  %s\n' '9673a4b9bdfc49a26022b047af0b8a91da74ed951ffd7dbe04181bce36980e6d' "$archive" \
+            | sha256sum --check -
+          unzip -q "$archive" -d "$tools"
+          mv "$tools/cmdline-tools" "$tools/13.0"
+          sdkmanager="$tools/13.0/bin/sdkmanager"
+          # 'yes' may get SIGPIPE after the license reader exits. Check the reader's exit status.
+          set +o pipefail
+          yes | "$sdkmanager" --sdk_root="$sdk" --licenses > /dev/null
+          set -o pipefail
+          "$sdkmanager" --sdk_root="$sdk" "platform-tools" "platforms;android-36" \
+            "build-tools;35.0.0" "ndk;27.3.13750724"
+          printf 'sdk.dir=%s\n' "$sdk" > local.properties
+          printf 'ANDROID_HOME=%s\n' "$sdk" >> "$GITHUB_ENV"
       - name: Fetch and verify bundled components
         run: bash tools/fetch_components.sh
       - name: Test, lint and build the modern flavor
-        run: ./gradlew --no-daemon :app:testModernDebugUnitTest :app:lintModernDebug :app:assembleModernDebug
+        run: ./gradlew --no-daemon --continue :app:testModernDebugUnitTest :app:lintModernDebug :app:assembleModernDebug
