@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <application android:allowBackup="false" android:label="WoW Security Probe" />
+    <instrumentation
+        android:name=".StorageProbe"
+        android:targetPackage="app.wowforever.securityprobe" />
+</manifest>

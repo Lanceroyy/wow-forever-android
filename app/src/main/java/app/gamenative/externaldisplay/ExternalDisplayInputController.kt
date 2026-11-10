@@ -111,7 +111,7 @@ class ExternalDisplayInputController(
     }
 
     private fun findPresentationDisplay(): Display? {
-        val currentDisplay = context.display ?: return null
+        val currentDisplay = context.currentDisplayCompat() ?: return null
         // Required detection logic for external presentation displays
         return displayManager
             ?.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
@@ -131,6 +131,7 @@ private class ExternalInputPresentation(
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
+        window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         window?.setFlags(
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,

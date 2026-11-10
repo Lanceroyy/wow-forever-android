@@ -23,6 +23,7 @@ import android.hardware.input.InputManager
 import android.view.InputDevice
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import app.gamenative.externaldisplay.currentDisplayCompat
 import app.gamenative.BuildConfig
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -171,7 +172,6 @@ import com.winlator.xenvironment.components.BionicProgramLauncherComponent
 import com.winlator.xenvironment.components.GlibcProgramLauncherComponent
 import com.winlator.xenvironment.components.GuestProgramLauncherComponent
 import com.winlator.xenvironment.components.NetworkInfoUpdateComponent
-import com.winlator.xenvironment.components.MicrophoneComponent
 import com.winlator.xenvironment.components.PulseAudioComponent
 import com.winlator.xenvironment.components.SysVSharedMemoryComponent
 import com.winlator.xenvironment.components.VirGLRendererComponent
@@ -237,7 +237,7 @@ private fun initialFpsLimiterTarget(container: Container): Int =
 
 private fun detectMaxRefreshRateHz(context: Context, attachedView: View?): Int {
     val display = attachedView?.display
-        ?: context.display
+        ?: context.currentDisplayCompat()
         ?: ContextCompat.getSystemService(context, DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)
 
     val refreshRate = when {
@@ -1939,7 +1939,7 @@ fun XServerScreen(
                 })
 
                 // Add invisible IME receiver to capture system keyboard input when keyboard is on external display
-                val imeDisplayContext = context.display?.let { display ->
+                val imeDisplayContext = context.currentDisplayCompat()?.let { display ->
                     context.createDisplayContext(display)
                 } ?: context
 
@@ -3707,41 +3707,18 @@ private fun setupXEnvironment(
     environment.addComponent(NetworkInfoUpdateComponent())
 
 
-    // Microphone support is published through PulseAudio (module-pipe-source), which Wine/Proton's
-    // winepulse.drv enumerates as a normal recording device. Opt-in per container.
-    val micEnabled = container.getMicEnabled() && PulseAudioComponent.isMicModuleAvailable(context)
-    if (container.getMicEnabled() && !micEnabled) {
-        Timber.w("Microphone enabled for this container but module-pipe-source.so is missing; skipping")
-    }
-
     if (xServerState.value.audioDriver == "alsa") {
         envVars.put("ANDROID_ALSA_SERVER", imageFs.getRootDir().getPath() + UnixSocketConfig.ALSA_SERVER_PATH)
         envVars.put("ANDROID_ASERVER_USE_SHM", "true")
         val options = ALSAClient.Options.fromKeyValueSet(null)
         environment.addComponent(ALSAServerComponent(UnixSocketConfig.createSocket(imageFs.getRootDir().getPath(), UnixSocketConfig.ALSA_SERVER_PATH), options))
-        if (micEnabled) {
-            // Playback stays on the ALSA server; run PulseAudio in mic-only mode (no AAudio sink, so
-            // no extra output path and no added playback latency) purely to expose the capture device.
-            envVars.put("PULSE_SERVER", imageFs.getRootDir().getPath() + UnixSocketConfig.PULSE_SERVER_PATH)
-            environment.addComponent(PulseAudioComponent(
-                UnixSocketConfig.createSocket(imageFs.getRootDir().getPath(), UnixSocketConfig.PULSE_SERVER_PATH),
-                container.pulseaudioLowLatency,
-                true,
-                false
-            ))
-        }
     } else if (xServerState.value.audioDriver == "pulseaudio") {
         envVars.put("PULSE_SERVER", imageFs.getRootDir().getPath() + UnixSocketConfig.PULSE_SERVER_PATH)
         environment.addComponent(PulseAudioComponent(
             UnixSocketConfig.createSocket(imageFs.getRootDir().getPath(), UnixSocketConfig.PULSE_SERVER_PATH),
             container.pulseaudioLowLatency,
-            micEnabled,
             true
         ))
-    }
-
-    if (micEnabled) {
-        environment.addComponent(MicrophoneComponent(PulseAudioComponent.getMicFifoFile(context)))
     }
 
     if (xServerState.value.graphicsDriver == "virgl") {

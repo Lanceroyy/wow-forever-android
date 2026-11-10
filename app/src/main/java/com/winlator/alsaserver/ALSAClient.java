@@ -175,7 +175,7 @@ public class ALSAClient {
             data.position(0);
             do {
                 try {
-                    int bytesWritten = this.audioTrack.write(data, data.remaining(), 0);
+                    int bytesWritten = this.audioTrack.write(data, data.remaining(), AudioTrack.WRITE_BLOCKING);
                     if (bytesWritten <= 0) {
                         break;
                     } else {
@@ -273,7 +273,7 @@ public class ALSAClient {
 
     public static void assignFramesPerBuffer(Context context) {
         try {
-            AudioManager am = (AudioManager) context.getSystemService("audio");
+            AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
             String framesPerBufferStr = am.getProperty("android.media.property.OUTPUT_FRAMES_PER_BUFFER");
             short parseShort = Short.parseShort(framesPerBufferStr);
             framesPerBuffer = parseShort;

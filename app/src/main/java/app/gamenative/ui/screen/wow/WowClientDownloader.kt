@@ -1,6 +1,8 @@
 package app.gamenative.ui.screen.wow
 
 import app.gamenative.utils.Net
+import app.gamenative.ui.screen.wow.WowDownloadPolicy.hex
+import java.nio.file.Files
 import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -22,15 +24,17 @@ object WowClientDownloader {
     const val EXE_NAME = "Wow-ARM64.exe"
     const val TARGET_PRODUCT = "wowf"
     const val BUILD_INFO = ".build.info"
+    internal const val UPDATE_MARKER = ".wow-update-in-progress"
 
     // The pre-release beta. Its Data/ archives are shared with the full release, so beta installs upgrade in place.
     const val LEGACY_FLAVOR_DIR = "_classic_beta_"
     const val LEGACY_PRODUCT = "wow_classic_beta"
     private const val PLATFORM_ARCH = "arm64"
     private const val EXCLUDED_ARCH = "x86_64"
-    private const val PATCH_URL = "http://us.patch.battle.net:1119/$TARGET_PRODUCT"
-    private const val DEFAULT_CDN_PATH = "tpr/wow"
-    private val DEFAULT_CDN_HOSTS = listOf("level3.blizzard.com", "us.cdn.blizzard.com")
+    private const val PATCH_URL = "https://us.version.battle.net/v2/products/$TARGET_PRODUCT"
+    private const val DEFAULT_CDN_PATH = WowDownloadPolicy.CDN_PATH
+    private const val MAX_OBJECT = 160 * 1024 * 1024
+    private const val MAX_CHUNK = 32 * 1024 * 1024
     private const val INDEX_DOWNLOAD_THREADS = 8
     private val BUILD_INFO_HEADER = listOf(
         "Branch!STRING:0", "Active!DEC:1", "Build Key!HEX:16", "CDN Key!HEX:16", "Install Key!HEX:16", "IM Size!DEC:4",
@@ -43,7 +47,7 @@ object WowClientDownloader {
     )
 
     private val patchHttp by lazy {
-        Net.http.newBuilder()
+        Net.strictHttp.newBuilder()
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(5, TimeUnit.SECONDS)
             .callTimeout(6, TimeUnit.SECONDS)
@@ -86,45 +90,81 @@ object WowClientDownloader {
             return null
         }
 
-        val remote = fetchRemote(row) ?: return null
+        val remote = fetchRemote() ?: return null
         val isOutdated = localVersion != remote.remoteVersion ||
             (remote.remoteBuildConfig.isNotBlank() && localBuildKey != remote.remoteBuildConfig)
         Timber.i("checkVersion: localVersion=$localVersion, remoteVersion=${remote.remoteVersion}, isOutdated=$isOutdated")
         return remote.copy(localVersion = localVersion, isOutdated = isOutdated)
     }
 
-    private fun fetchRemote(localRow: Map<String, String>? = null): VersionCheckResult? {
-        val versions = runCatching { fetchText("$PATCH_URL/versions") }.getOrElse {
-            Timber.w(it, "fetchRemote: http call failed")
-            return null
-        } ?: run {
-            Timber.w("fetchRemote: response body is null or unsuccessful")
-            return null
-        }
-        val remoteRow = parsePsv(versions).firstOrNull()
-            ?: run {
-                Timber.w("fetchRemote: no remote row in $versions")
-                return null
-            }
-        val remoteVersion = remoteRow["VersionsName"] ?: remoteRow["VersionName"] ?: remoteRow["Version"]
-            ?: run {
-                Timber.w("fetchRemote: no remoteVersion in $remoteRow")
-                return null
-            }
+    private fun fetchRemote(): VersionCheckResult? = try {
+        parseRemote(fetchText("$PATCH_URL/versions"), fetchText("$PATCH_URL/cdns"))
+    } catch (e: IOException) {
+        Timber.w(e, "Blizzard HTTPS metadata unavailable or invalid")
+        null
+    }
 
-        val cdns = runCatching { fetchText("$PATCH_URL/cdns") }.getOrNull()?.let(::parsePsv).orEmpty()
-        val cdnsRow = cdns.firstOrNull { it["Name"] == "us" } ?: cdns.firstOrNull()
-
+    internal fun parseRemote(versions: String, cdns: String): VersionCheckResult {
+        val version = usRow(versions, "Region")
+        val remoteVersion = version["VersionsName"]?.takeIf { Regex("[0-9]+(?:[.][0-9]+){1,5}").matches(it) }
+            ?: throw IOException("Invalid Blizzard build version")
+        val servers = httpsServers(cdns)
         return VersionCheckResult(
             localVersion = "",
             remoteVersion = remoteVersion,
             isOutdated = true,
-            remoteBuildConfig = remoteRow["BuildConfig"].orEmpty(),
-            remoteCdnConfig = remoteRow["CDNConfig"].orEmpty(),
-            remoteCdnHosts = (cdnsRow?.get("Hosts") ?: localRow?.get("CDN Hosts"))?.let(::splitHosts) ?: DEFAULT_CDN_HOSTS,
-            remoteCdnPath = cdnsRow?.get("Path") ?: localRow?.get("CDN Path") ?: DEFAULT_CDN_PATH,
-            remoteCdnServers = (cdnsRow?.get("Servers") ?: localRow?.get("CDN Servers"))?.let(::splitHosts).orEmpty(),
+            remoteBuildConfig = WowDownloadPolicy.key(version["BuildConfig"].orEmpty()),
+            remoteCdnConfig = WowDownloadPolicy.key(version["CDNConfig"].orEmpty()),
+            remoteCdnHosts = servers.mapNotNull(WowDownloadPolicy::cdnHost).distinct(),
+            remoteCdnPath = DEFAULT_CDN_PATH,
+            remoteCdnServers = servers,
         )
+    }
+
+    private fun usRow(text: String, column: String): Map<String, String> =
+        parsePsv(text, strict = true).singleOrNull { it[column] == "us" }
+            ?: throw IOException("Invalid Blizzard $column metadata")
+
+    private fun httpsServers(cdns: String): List<String> {
+        val cdn = usRow(cdns, "Name")
+        if (cdn["Path"] != DEFAULT_CDN_PATH) throw IOException("Untrusted Blizzard CDN path")
+        // TACT v2 advertises legacy HTTP routes too. Only the known, official HTTPS entries are usable.
+        val servers = splitHosts(cdn["Servers"].orEmpty()).filter { WowDownloadPolicy.cdnHost(it) != null }.distinct()
+        if (servers.isEmpty()) throw IOException("Blizzard did not advertise a trusted HTTPS CDN")
+        return servers
+    }
+
+    /** Old and desktop installs may still advertise HTTP routes to the native guest. */
+    fun prepareGuestCdnRoutes(gameRoot: File) {
+        val info = WowDownloadPolicy.destination(gameRoot, BUILD_INFO)
+        val current = activeBuild(info)
+        val servers = splitHosts(current["CDN Servers"].orEmpty())
+        val allowed = servers.filter { WowDownloadPolicy.cdnHost(it) != null }
+        val hosts = allowed.mapNotNull(WowDownloadPolicy::cdnHost)
+        if (current["CDN Path"] == DEFAULT_CDN_PATH && hosts.isNotEmpty() && hosts.size == servers.size &&
+            splitHosts(current["CDN Hosts"].orEmpty()) == hosts.distinct()
+        ) return
+        rewriteGuestCdnRoutes(info, allowed.ifEmpty { httpsServers(fetchText("$PATCH_URL/cdns")) })
+    }
+
+    internal fun rewriteGuestCdnRoutes(buildInfo: File, servers: List<String>) {
+        val hosts = servers.map { WowDownloadPolicy.cdnHost(it) ?: throw IOException("Untrusted Blizzard CDN route") }
+        if (hosts.isEmpty()) throw IOException("No trusted Blizzard CDN")
+        val lines = buildInfo.readLines().toMutableList()
+        val header = psvHeader(lines.firstOrNull() ?: throw IOException("Missing Blizzard build header"))
+        val values = mapOf("CDN Path" to DEFAULT_CDN_PATH, "CDN Hosts" to hosts.distinct().joinToString(" "),
+            "CDN Servers" to servers.joinToString(" "))
+        if (!header.containsAll(values.keys) || "Product" !in header) throw IOException("Missing Blizzard CDN columns")
+        val rows = lines.indices.drop(1).filter { i ->
+            lines[i].split("|").getOrNull(header.indexOf("Product")) == TARGET_PRODUCT
+        }
+        val index = rows.firstOrNull { lines[it].split("|").getOrNull(header.indexOf("Active")) == "1" }
+            ?: rows.firstOrNull() ?: throw IOException("Missing WoW Forever build row")
+        val cells = lines[index].split("|").toMutableList()
+        if (cells.size < header.size) throw IOException("Incomplete WoW Forever build row")
+        values.forEach { (name, value) -> cells[header.indexOf(name)] = value }
+        lines[index] = cells.joinToString("|")
+        writeAtomically(buildInfo, (lines.joinToString("\n") + "\n").toByteArray())
     }
 
     /**
@@ -136,64 +176,36 @@ object WowClientDownloader {
     fun install(gameRoot: File, onStatus: (String) -> Unit) {
         onStatus("Checking the latest World of Warcraft build...")
         val target = fetchRemote() ?: throw IOException("Couldn't reach Blizzard's patch server. Check your connection.")
-        check(target.remoteBuildConfig.isNotBlank()) { "Blizzard's patch server returned no build" }
-        listOf("Data/data", "Data/indices", "Data/config").forEach { File(gameRoot, it).mkdirs() }
-        seedResidency(gameRoot)
+        Files.createDirectories(gameRoot.canonicalFile.toPath())
+        WowDownloadPolicy.destination(gameRoot, "Data/data/.layout", createParents = true)
         updateGame(gameRoot, target, onStatus)
     }
 
-    // The Battle.net app tracks which shared archives each product uses in Data/<product>/. A beta install has the same
-    // archives as the full release, so its record is a better starting point than none.
-    private fun seedResidency(gameRoot: File) {
-        val residency = File(gameRoot, "Data/$TARGET_PRODUCT")
-        val legacy = File(gameRoot, "Data/$LEGACY_PRODUCT")
-        if (residency.exists() || !legacy.isDirectory) return
-        runCatching { legacy.copyRecursively(residency) }.onFailure { Timber.w(it, "Couldn't copy the beta residency data") }
-    }
-
     fun updateGame(gameRoot: File, target: VersionCheckResult, onStatus: (String) -> Unit) {
-        val cdn = Cdn(
-            hosts = target.remoteCdnHosts.ifEmpty { DEFAULT_CDN_HOSTS },
-            path = target.remoteCdnPath.ifEmpty { DEFAULT_CDN_PATH },
-        )
+        val cdn = Cdn(hosts = target.remoteCdnHosts, path = target.remoteCdnPath)
         onStatus("Fetching build ${target.remoteVersion} manifest...")
-        val buildConfigRaw = cdn.require("config", target.remoteBuildConfig)
-        val cdnConfigRaw = target.remoteCdnConfig.takeIf { it.isNotBlank() }?.let { cdn.require("config", it) }
+        val buildConfigRaw = cdn.config(target.remoteBuildConfig)
+        val cdnConfigRaw = cdn.config(target.remoteCdnConfig)
+        val cdnConfig = parseConfig(cdnConfigRaw.decodeToString())
+        val buildConfig = parseConfig(buildConfigRaw.decodeToString())
+        if (buildConfig["build-uid"]?.singleOrNull() != TARGET_PRODUCT) throw IOException("Wrong Blizzard build product")
+        val archives = cdnConfig["archives"].orEmpty().map(WowDownloadPolicy::key)
+        val indices = (archives + cdnConfig["file-index"].orEmpty().map(WowDownloadPolicy::key)).distinct()
 
         saveConfig(gameRoot, target.remoteBuildConfig, buildConfigRaw)
-        cdnConfigRaw?.let { saveConfig(gameRoot, target.remoteCdnConfig, it) }
-
-        val cdnConfig = cdnConfigRaw?.let { parseConfig(String(it)) }
-        cdnConfig?.let { syncIndices(gameRoot, cdn, it, onStatus) }
-        syncClient(
-            gameRoot = gameRoot,
-            cdn = cdn,
-            buildConfig = parseConfig(String(buildConfigRaw)),
-            archives = lazy { cdnConfig?.let { ArchiveLocator(cdn, gameRoot, it.getValue("archives")) } },
-            onStatus = onStatus,
-        )
+        saveConfig(gameRoot, target.remoteCdnConfig, cdnConfigRaw)
+        syncIndices(gameRoot, cdn, indices, onStatus)
+        syncClient(gameRoot, cdn, buildConfig, lazy { ArchiveLocator(cdn, gameRoot, archives) }, onStatus)
 
         onStatus("Updating build information...")
-        upsertBuildInfo(File(gameRoot, BUILD_INFO), target)
+        upsertBuildInfo(WowDownloadPolicy.destination(gameRoot, BUILD_INFO), target)
+        Files.deleteIfExists(WowDownloadPolicy.destination(gameRoot, UPDATE_MARKER).toPath())
     }
 
     fun download(gameRoot: File, onStatus: (String) -> Unit) {
-        val row = activeBuild(File(gameRoot, BUILD_INFO))
-        check(row["Product"] == TARGET_PRODUCT) { "Incompatible game product: ${row["Product"]}. Expected $TARGET_PRODUCT." }
         val latest = checkVersion(gameRoot)
-        if (latest != null && latest.remoteBuildConfig.isNotBlank()) return updateGame(gameRoot, latest, onStatus)
-
-        val cdn = Cdn(hosts = splitHosts(row.getValue("CDN Hosts")), path = row.getValue("CDN Path"))
-        onStatus("Reading build ${row["Version"].orEmpty()} manifest...")
-        syncClient(
-            gameRoot = gameRoot,
-            cdn = cdn,
-            buildConfig = parseConfig(String(cdn.require("config", row.getValue("Build Key")))),
-            archives = lazy {
-                ArchiveLocator(cdn, gameRoot, parseConfig(String(cdn.require("config", row.getValue("CDN Key")))).getValue("archives"))
-            },
-            onStatus = onStatus,
-        )
+            ?: throw IOException("Could not authenticate the build through Blizzard HTTPS. No client files were downloaded.")
+        updateGame(gameRoot, latest, onStatus)
     }
 
     private fun syncClient(
@@ -203,51 +215,68 @@ object WowClientDownloader {
         archives: Lazy<ArchiveLocator?>,
         onStatus: (String) -> Unit,
     ) {
-        val files = parseInstall(blteDecode(cdn.require("data", buildConfig.getValue("install")[1]))).filter { it.isClientBinary() }
-        check(files.isNotEmpty()) { "No Windows ARM64 client files in this build" }
-
-        val clientDir = File(gameRoot, FLAVOR_DIR)
-        val pending = files.filter { md5Hex(File(clientDir, it.relativePath)) != it.ckey }
+        fun keys(name: String): List<String> = buildConfig[name]?.takeIf { it.size == 2 }?.map(WowDownloadPolicy::key)
+            ?: throw IOException("Invalid CASC $name metadata")
+        val (installCkey, installEkey) = keys("install")
+        val encodedInstall = cdn.require("data", installEkey)
+        verifyEncodedKey(encodedInstall, installEkey)
+        val decodedInstall = blteDecode(encodedInstall)
+        WowDownloadPolicy.verifyMd5(decodedInstall, installCkey)
+        val files = parseInstall(decodedInstall).filter { it.isClientBinary() }
+        if (files.none { it.relativePath.equals(EXE_NAME, ignoreCase = true) }) throw IOException("ARM64 executable missing from manifest")
+        val paths = files.associateWith { entry ->
+            WowDownloadPolicy.destination(gameRoot, "$FLAVOR_DIR/${entry.relativePath}")
+        }
+        if (paths.values.map { it.path.lowercase(Locale.ROOT) }.distinct().size != files.size) {
+            throw IOException("Duplicate CASC output paths")
+        }
+        val pending = files.filter { md5Hex(paths.getValue(it)) != it.ckey }
         if (pending.isEmpty()) return
 
         onStatus("Looking up client files...")
-        val ekeys = EncodingLookup(cdn, buildConfig.getValue("encoding")[1]).find(pending.map { it.ckey }.toSet())
-        pending.forEachIndexed { index, entry ->
-            onStatus("Downloading ${entry.name} (${index + 1}/${pending.size})...")
-            val ekey = ekeys[entry.ckey] ?: throw IOException("${entry.name} is missing from the encoding table")
-            val encoded = cdn.fetch("data", ekey) ?: archives.value?.read(ekey) ?: throw IOException("${entry.name} not found on the CDN")
-            writeVerified(File(clientDir, entry.relativePath), entry, encoded)
+        val ekeys = EncodingLookup(cdn, keys("encoding")[1]).find(pending.map { it.ckey }.toSet())
+        val staged = mutableListOf<Pair<File, File>>()
+        try {
+            // Stage all binaries before replacing any of them. Publish the executable last.
+            pending.sortedBy { it.relativePath.equals(EXE_NAME, ignoreCase = true) }.forEachIndexed { index, entry ->
+                onStatus("Downloading ${entry.name} (${index + 1}/${pending.size})...")
+                val ekey = ekeys[entry.ckey] ?: throw IOException("${entry.name} is missing from the encoding table")
+                val encoded = cdn.fetch("data", ekey) ?: archives.value?.read(ekey)
+                    ?: throw IOException("${entry.name} not found on the CDN")
+                verifyEncodedKey(encoded, ekey)
+                val dest = WowDownloadPolicy.destination(gameRoot, "$FLAVOR_DIR/${entry.relativePath}", createParents = true)
+                val temp = WowDownloadPolicy.stage(dest) { out ->
+                    val digest = MessageDigest.getInstance("MD5")
+                    val size = blteDecode(encoded, DigestOutputStream(out, digest), entry.size)
+                    if (size != entry.size || digest.digest().hex() != entry.ckey) {
+                        throw IOException("Checksum or length mismatch for ${entry.name}")
+                    }
+                }
+                staged += temp to dest
+            }
+            // If the process dies during publication, the next launch must repair the update
+            // before running a mixture of binaries from two builds.
+            writeAtomically(WowDownloadPolicy.destination(gameRoot, UPDATE_MARKER), byteArrayOf(1))
+            staged.forEach { (temp, dest) -> WowDownloadPolicy.replace(temp, dest) }
+        } finally {
+            staged.forEach { (temp, _) -> Files.deleteIfExists(temp.toPath()) }
         }
-    }
-
-    private fun writeVerified(dest: File, entry: InstallEntry, encoded: ByteArray) {
-        dest.parentFile?.mkdirs()
-        val temp = File(dest.parentFile, "${dest.name}.download")
-        val digest = MessageDigest.getInstance("MD5")
-        DigestOutputStream(temp.outputStream().buffered(), digest).use { blteDecode(encoded, it) }
-        if (hex(digest.digest(), 0, 16) != entry.ckey) {
-            temp.delete()
-            throw IOException("Checksum mismatch for ${entry.name}")
-        }
-        dest.delete()
-        check(temp.renameTo(dest)) { "Could not write ${dest.path}" }
     }
 
     private fun saveConfig(gameRoot: File, key: String, bytes: ByteArray) =
-        writeAtomically(File(gameRoot, "Data/config/${key.substring(0, 2)}/${key.substring(2, 4)}/$key"), bytes)
+        writeAtomically(WowDownloadPolicy.destination(
+            gameRoot, "Data/config/${key.take(2)}/${key.substring(2, 4)}/$key", createParents = true,
+        ), bytes)
 
-    // Patch archives and archive groups aren't needed to play: the former live under patch/, and the client builds the latter.
-    private fun syncIndices(gameRoot: File, cdn: Cdn, cdnConfig: Map<String, List<String>>, onStatus: (String) -> Unit) {
-        val required = cdnConfig["archives"].orEmpty() + cdnConfig["file-index"].orEmpty()
-        val missing = required.distinct().filter { !File(gameRoot, "Data/indices/$it.index").isFile }
-        if (missing.isEmpty()) return
+    // Patch archives and archive groups aren't needed to play; missing archives stream in the guest.
+    private fun syncIndices(gameRoot: File, cdn: Cdn, keys: List<String>, onStatus: (String) -> Unit) {
         val done = AtomicInteger()
         val pool = Executors.newFixedThreadPool(INDEX_DOWNLOAD_THREADS)
         try {
-            missing.map { hash ->
+            keys.map { key ->
                 pool.submit {
-                    cdn.fetch("data", "$hash.index")?.let { writeAtomically(File(gameRoot, "Data/indices/$hash.index"), it) }
-                    onStatus("Syncing archive indexes (${done.incrementAndGet()}/${missing.size})...")
+                    readIndex(cdn, gameRoot, key)
+                    onStatus("Checking archive indexes (${done.incrementAndGet()}/${keys.size})...")
                 }
             }.forEach { it.get() }
         } catch (e: ExecutionException) {
@@ -257,13 +286,49 @@ object WowClientDownloader {
         }
     }
 
-    private fun writeAtomically(dest: File, bytes: ByteArray) {
-        dest.parentFile?.mkdirs()
-        val temp = File(dest.parentFile, "${dest.name}.download")
-        temp.writeBytes(bytes)
-        dest.delete()
-        check(temp.renameTo(dest)) { "Could not write ${dest.path}" }
+    private fun readIndex(cdn: Cdn, gameRoot: File, key: String): ByteArray? {
+        WowDownloadPolicy.key(key)
+        val file = WowDownloadPolicy.destination(gameRoot, "Data/indices/$key.index", createParents = true)
+        if (file.isFile && file.length() in 28L..MAX_CHUNK.toLong()) {
+            val local = file.readBytes()
+            try {
+                verifyIndex(local, key)
+                return local
+            } catch (_: IOException) {
+                // Do not trust a previously downloaded (possibly HTTP) or modified index.
+            }
+        }
+        val fetched = cdn.fetch("data", "$key.index") ?: run {
+            if (file.exists()) throw IOException("Cannot replace invalid Blizzard archive index")
+            return null
+        }
+        verifyIndex(fetched, key)
+        writeAtomically(file, fetched)
+        return fetched
     }
+
+    internal fun verifyIndex(bytes: ByteArray, key: String) {
+        val footer = bytes.size - 28
+        if (footer <= 0 || footer % 4120 != 0) throw IOException("Unsupported CASC index layout")
+        val pages = footer / 4120
+        val toc = pages * 4096
+        val layout = bytes.copyOfRange(footer + 8, footer + 16)
+        val common = layout.contentEquals(byteArrayOf(1, 0, 0, 4, 4, 4, 16, 8))
+        val loose = layout.contentEquals(byteArrayOf(1, 0, 0, 4, 0, 4, 16, 8))
+        if (!common && !loose) throw IOException("Unsupported CASC index layout")
+        WowDownloadPolicy.verifyMd5(bytes.copyOfRange(footer, bytes.size), key)
+        fun verifyShortHash(start: Int, size: Int, expected: Int) {
+            val md = MessageDigest.getInstance("MD5")
+            md.update(bytes, start, size)
+            if (!md.digest().copyOf(8).contentEquals(bytes.copyOfRange(expected, expected + 8))) {
+                throw IOException("CASC index checksum mismatch")
+            }
+        }
+        verifyShortHash(toc, footer - toc, footer)
+        for (page in 0 until pages) verifyShortHash(page * 4096, 4096, toc + 16 * pages + page * 8)
+    }
+
+    private fun writeAtomically(dest: File, bytes: ByteArray) = WowDownloadPolicy.writeAtomically(dest) { it.write(bytes) }
 
     /**
      * Points the [TARGET_PRODUCT] row of [buildInfo] at [target], adding the row (and the file) when it's missing.
@@ -306,7 +371,7 @@ object WowClientDownloader {
         else -> "us"
     }
 
-    private data class InstallEntry(val name: String, val ckey: String, val tags: Set<String>) {
+    private data class InstallEntry(val name: String, val ckey: String, val size: Int, val tags: Set<String>) {
         val relativePath get() = name.replace('\\', '/')
 
         fun isClientBinary(): Boolean {
@@ -317,57 +382,77 @@ object WowClientDownloader {
     }
 
     private class Cdn(val hosts: List<String>, val path: String) {
-        fun require(kind: String, key: String) = fetch(kind, key) ?: throw IOException("CDN is missing $kind/$key")
+        fun require(kind: String, key: String) = fetch(kind, key) ?: throw IOException("Missing Blizzard CDN object")
+
+        fun config(key: String): ByteArray = require("config", key).also { WowDownloadPolicy.verifyMd5(it, key) }
 
         fun fetch(kind: String, key: String, range: LongRange? = null): ByteArray? {
+            val maxBytes = when {
+                range != null -> {
+                    val length = range.last - range.first + 1
+                    if (range.first < 0 || length !in 1L..MAX_OBJECT.toLong()) throw IOException("Invalid CASC range")
+                    length.toInt()
+                }
+                kind == "config" -> 1024 * 1024
+                key.endsWith(".index") -> MAX_CHUNK
+                else -> MAX_OBJECT
+            }
             var failure: IOException? = null
-            var missing = false
+            if (hosts.isEmpty()) throw IOException("No trusted Blizzard CDN")
             for (host in hosts) {
                 val request = Request.Builder()
-                    .url("http://$host/$path/$kind/${key.substring(0, 2)}/${key.substring(2, 4)}/$key")
+                    .url(WowDownloadPolicy.cdnUrl(host, path, kind, key))
+                    .header("Accept-Encoding", "identity")
                     .apply { if (range != null) header("Range", "bytes=${range.first}-${range.last}") }
                     .build()
                 try {
-                    Net.http.newCall(request).execute().use { response ->
-                        when {
-                            response.isSuccessful -> return response.body!!.bytes()
-                            response.code == 403 || response.code == 404 -> missing = true
-                            else -> failure = IOException("HTTP ${response.code} from $host")
+                    Net.strictHttp.newCall(request).execute().use { response ->
+                        if (response.code == 403 || response.code == 404) return@use
+                        if (range == null && response.code != 200 || range != null && response.code != 206) {
+                            throw IOException("Unexpected Blizzard CDN response: ${response.code}")
                         }
+                        if (range != null) {
+                            val contentRange = response.header("Content-Range").orEmpty()
+                            val prefix = "bytes ${range.first}-${range.last}/"
+                            if (!contentRange.startsWith(prefix) ||
+                                (contentRange.removePrefix(prefix).toLongOrNull() ?: 0) <= range.last
+                            ) throw IOException("Unexpected Blizzard CDN range")
+                        }
+                        val body = response.body ?: throw IOException("Empty CDN response")
+                        val bytes = readBounded(body, maxBytes)
+                        if (range != null && bytes.size != maxBytes) throw IOException("Truncated Blizzard CDN range")
+                        return bytes
                     }
                 } catch (e: IOException) {
                     failure = e
                 }
             }
-            if (missing) return null
-            throw failure ?: IOException("No CDN hosts in $BUILD_INFO")
+            failure?.let { throw it }
+            return null
         }
     }
 
+    private fun readBounded(body: okhttp3.ResponseBody, max: Int): ByteArray {
+        if (body.contentLength() > max || body.source().request(max.toLong() + 1)) {
+            throw IOException("Blizzard response exceeds its size limit")
+        }
+        return body.bytes()
+    }
+
     private class EncodingLookup(private val cdn: Cdn, private val ekey: String) {
-        private data class Chunk(val encodedOffset: Long, val encodedSize: Int, val decodedOffset: Long, val decodedSize: Int)
-
-        private val chunks: List<Chunk> = parseChunkTable(ByteBuffer.wrap(fetchEncoded(0, 8)).getInt(4))
-
-        private fun parseChunkTable(headerSize: Int): List<Chunk> {
-            val header = ByteBuffer.wrap(fetchEncoded(0, headerSize))
-            val count = header.getInt(8) and 0xFFFFFF
-            var encoded = headerSize.toLong()
-            var decoded = 0L
-            return (0 until count).map { i ->
-                val compressedSize = header.getInt(12 + i * 24)
-                val decompressedSize = header.getInt(16 + i * 24)
-                Chunk(encoded, compressedSize, decoded, decompressedSize).also {
-                    encoded += compressedSize
-                    decoded += decompressedSize
-                }
-            }
+        private val chunks: List<BlteChunk> = run {
+            val size = headerSize(fetchEncoded(0, 8))
+            if (size !in 36..1024 * 1024) throw IOException("Invalid CASC encoding header")
+            val header = fetchEncoded(0, size)
+            WowDownloadPolicy.verifyMd5(header, ekey)
+            chunkTable(header, size)
         }
 
-        private var cachedChunk: Chunk? = null
+        private var cachedChunk: BlteChunk? = null
         private var cachedData: ByteArray = ByteArray(0)
 
-        private fun read(start: Long, length: Int): ByteArray {
+        private fun read(start: Long, length: Int, expectedPageHash: String? = null): ByteArray {
+            if (length !in 1..MAX_CHUNK || start < 0) throw IOException("Invalid CASC encoding read")
             val out = ByteArray(length)
             var written = 0
             for (chunk in chunks) {
@@ -375,8 +460,11 @@ object WowClientDownloader {
                 if (chunkEnd <= start || chunk.decodedOffset >= start + length) continue
                 val from = maxOf(start, chunk.decodedOffset) - chunk.decodedOffset
                 val count = (minOf(start + length, chunkEnd) - chunk.decodedOffset - from).toInt()
-                val mode = fetchEncoded(chunk.encodedOffset, 1)[0].toInt().toChar()
-                val bytes = if (mode == 'N') {
+                val bytes = if (expectedPageHash != null && chunk.encodedSize == chunk.decodedSize + 1 &&
+                    fetchEncoded(chunk.encodedOffset, 1)[0] == 'N'.code.toByte()
+                ) {
+                    // Large uncompressed chunks can be read by page because the page hash comes
+                    // from the encoding index, whose own chunks were verified against the EKey.
                     fetchEncoded(chunk.encodedOffset + 1 + from, count)
                 } else {
                     decodedChunk(chunk).copyOfRange(from.toInt(), from.toInt() + count)
@@ -384,12 +472,20 @@ object WowClientDownloader {
                 bytes.copyInto(out, written)
                 written += count
             }
+            if (written != length) throw IOException("Truncated CASC encoding data")
+            expectedPageHash?.let { WowDownloadPolicy.verifyMd5(out, it) }
             return out
         }
 
-        private fun decodedChunk(chunk: Chunk): ByteArray {
+        private fun decodedChunk(chunk: BlteChunk): ByteArray {
             if (cachedChunk != chunk) {
-                cachedData = decodeChunk(fetchEncoded(chunk.encodedOffset, chunk.encodedSize))
+                if (chunk.encodedSize > MAX_CHUNK || chunk.decodedSize > MAX_CHUNK) {
+                    throw IOException("Oversized CASC encoding metadata chunk")
+                }
+                val encoded = fetchEncoded(chunk.encodedOffset, chunk.encodedSize)
+                WowDownloadPolicy.verifyMd5(encoded, chunk.md5)
+                cachedData = decodeChunk(encoded, chunk.decodedSize, 0)
+                if (cachedData.size != chunk.decodedSize) throw IOException("CASC encoding chunk length mismatch")
                 cachedChunk = chunk
             }
             return cachedData
@@ -400,11 +496,17 @@ object WowClientDownloader {
 
         fun find(wanted: Set<String>): Map<String, String> {
             val header = ByteBuffer.wrap(read(0, 22))
+            if (header.get(0) != 'E'.code.toByte() || header.get(1) != 'N'.code.toByte() || header.get(2) != 1.toByte()) {
+                throw IOException("Invalid CASC encoding file")
+            }
             val ckeySize = header.get(3).toInt()
             val ekeySize = header.get(4).toInt()
             val pageSize = (header.getShort(5).toInt() and 0xFFFF) * 1024
             val pageCount = header.getInt(9)
             val especSize = header.getInt(18)
+            if (ckeySize != 16 || ekeySize != 16 || pageSize !in 1024..65536 ||
+                pageCount !in 1..262144 || especSize !in 0..MAX_CHUNK
+            ) throw IOException("Invalid CASC encoding dimensions")
             val indexStart = 22L + especSize
             val indexEntrySize = ckeySize + 16
             val index = read(indexStart, pageCount * indexEntrySize)
@@ -415,10 +517,13 @@ object WowClientDownloader {
             wanted.groupBy { ckey -> firstKeys.binarySearch(ckey).let { if (it >= 0) it else -it - 2 } }
                 .filterKeys { it >= 0 }
                 .forEach { (page, ckeys) ->
-                    val data = read(pagesStart + page.toLong() * pageSize, pageSize)
+                    val data = read(
+                        pagesStart + page.toLong() * pageSize, pageSize, hex(index, page * indexEntrySize + ckeySize, 16),
+                    )
                     var pos = 0
-                    while (pos + 6 + ckeySize <= data.size && data[pos].toInt() != 0) {
+                    while (pos < data.size && data[pos].toInt() != 0) {
                         val keyCount = data[pos].toInt() and 0xFF
+                        if (pos + 6 + ckeySize + keyCount * ekeySize > data.size) throw IOException("Truncated CASC encoding page")
                         val ckey = hex(data, pos + 6, ckeySize)
                         if (ckey in ckeys) found[ckey] = hex(data, pos + 6 + ckeySize, ekeySize)
                         pos += 6 + ckeySize + keyCount * ekeySize
@@ -431,12 +536,7 @@ object WowClientDownloader {
     private class ArchiveLocator(private val cdn: Cdn, private val gameRoot: File, private val archives: List<String>) {
         fun read(ekey: String): ByteArray? {
             for (archive in archives) {
-                val local = File(gameRoot, "Data/indices/$archive.index")
-                val index = if (local.isFile) {
-                    local.readBytes()
-                } else {
-                    cdn.fetch("data", "$archive.index")?.also { writeAtomically(local, it) } ?: continue
-                }
+                val index = readIndex(cdn, gameRoot, archive) ?: continue
                 val buffer = ByteBuffer.wrap(index)
                 for (block in 0 until index.size / 4096 * 4096 step 4096) {
                     var pos = block
@@ -454,9 +554,10 @@ object WowClientDownloader {
         }
     }
 
-    private fun fetchText(url: String): String? =
+    private fun fetchText(url: String): String =
         patchHttp.newCall(Request.Builder().url(url).build()).execute().use { response ->
-            if (response.isSuccessful) response.body?.string() else null
+            if (response.code != 200) throw IOException("Blizzard metadata HTTP ${response.code}")
+            readBounded(response.body ?: throw IOException("Empty Blizzard metadata"), 64 * 1024).decodeToString()
         }
 
     private fun activeBuild(buildInfo: File): Map<String, String> {
@@ -469,10 +570,14 @@ object WowClientDownloader {
             ?: throw IllegalStateException("No build in $BUILD_INFO")
     }
 
-    private fun parsePsv(text: String): List<Map<String, String>> {
+    private fun parsePsv(text: String, strict: Boolean = false): List<Map<String, String>> {
         val lines = text.lines().filter { it.isNotBlank() && !it.startsWith("#") }
         val header = psvHeader(lines.firstOrNull() ?: return emptyList())
-        return lines.drop(1).map { header.zip(it.split("|")).toMap() }
+        if (header.distinct().size != header.size) return emptyList()
+        return lines.drop(1).mapNotNull {
+            val values = it.split("|")
+            if (strict && values.size != header.size) null else header.zip(values).toMap()
+        }
     }
 
     private fun psvHeader(line: String) = line.split("|").map { it.substringBefore("!") }
@@ -485,73 +590,139 @@ object WowClientDownloader {
         }
 
     private fun parseInstall(data: ByteArray): List<InstallEntry> {
-        check(data[0] == 'I'.code.toByte() && data[1] == 'N'.code.toByte()) { "Bad install manifest" }
+        if (data.size < 10 || data[0] != 'I'.code.toByte() || data[1] != 'N'.code.toByte()) {
+            throw IOException("Bad CASC install manifest")
+        }
         val buffer = ByteBuffer.wrap(data)
         val hashSize = data[3].toInt()
         val tagCount = buffer.getShort(4).toInt() and 0xFFFF
         val entryCount = buffer.getInt(6)
+        if (hashSize != 16 || entryCount !in 1..100_000 || tagCount > 1024) throw IOException("Invalid CASC install table")
         val maskSize = (entryCount + 7) / 8
         var pos = 10
 
         fun readString(): String {
-            val end = (pos until data.size).first { data[it].toInt() == 0 }
+            val end = (pos until minOf(pos + 4096, data.size)).firstOrNull { data[it].toInt() == 0 }
+                ?: throw IOException("Invalid CASC install entry")
             return String(data, pos, end - pos).also { pos = end + 1 }
         }
 
         val tags = (0 until tagCount).map {
             val name = readString()
             pos += 2
+            if (pos + maskSize > data.size) throw IOException("Truncated CASC install mask")
             (name to data.copyOfRange(pos, pos + maskSize)).also { pos += maskSize }
         }
         return (0 until entryCount).map { i ->
             val name = readString()
+            if (pos + hashSize + 4 > data.size) throw IOException("Truncated CASC install table")
             val ckey = hex(data, pos, hashSize)
+            val size = buffer.getInt(pos + hashSize)
             pos += hashSize + 4
             val entryTags = tags.filter { (_, mask) -> mask[i / 8].toInt() and (0x80 ushr (i % 8)) != 0 }.map { it.first }.toSet()
-            InstallEntry(name, ckey, entryTags)
+            InstallEntry(name, ckey, size, entryTags)
         }
     }
 
-    private fun blteDecode(data: ByteArray) = ByteArrayOutputStream(data.size).also { blteDecode(data, it) }.toByteArray()
+    private data class BlteChunk(
+        val encodedOffset: Long,
+        val encodedSize: Int,
+        val decodedOffset: Long,
+        val decodedSize: Int,
+        val md5: String,
+    )
 
-    private fun blteDecode(data: ByteArray, out: OutputStream) {
-        check(String(data, 0, 4) == "BLTE") { "Not BLTE data" }
+    private fun headerSize(data: ByteArray): Int {
+        if (data.size < 8 || String(data, 0, 4, Charsets.US_ASCII) != "BLTE") throw IOException("Not BLTE data")
+        return ByteBuffer.wrap(data).getInt(4)
+    }
+
+    private fun chunkTable(data: ByteArray, size: Int): List<BlteChunk> {
+        if (size !in 36..minOf(data.size, 1024 * 1024) || data[8] != 0x0F.toByte()) {
+            throw IOException("Invalid BLTE header")
+        }
         val buffer = ByteBuffer.wrap(data)
-        val headerSize = buffer.getInt(4)
-        if (headerSize == 0) {
-            out.write(decodeChunk(data.copyOfRange(8, data.size)))
-            return
-        }
         val count = buffer.getInt(8) and 0xFFFFFF
-        var offset = headerSize
-        for (i in 0 until count) {
-            val compressedSize = buffer.getInt(12 + i * 24)
-            out.write(decodeChunk(data.copyOfRange(offset, offset + compressedSize)))
-            offset += compressedSize
+        if (size != 12 + count * 24) throw IOException("Invalid BLTE chunk table")
+        var encoded = size.toLong()
+        var decoded = 0L
+        return (0 until count).map { i ->
+            val offset = 12 + i * 24
+            val compressed = buffer.getInt(offset)
+            val uncompressed = buffer.getInt(offset + 4)
+            if (compressed !in 1..MAX_OBJECT || uncompressed !in 0..MAX_OBJECT) throw IOException("Invalid BLTE chunk size")
+            BlteChunk(encoded, compressed, decoded, uncompressed, hex(data, offset + 8, 16)).also {
+                encoded += compressed
+                decoded += uncompressed
+            }
         }
     }
 
-    private fun decodeChunk(chunk: ByteArray): ByteArray {
+    internal fun verifyEncodedKey(data: ByteArray, key: String) {
+        val size = headerSize(data)
+        if (size == 0) {
+            WowDownloadPolicy.verifyMd5(data, key)
+        } else {
+            chunkTable(data, size)
+            WowDownloadPolicy.verifyMd5(data.copyOf(size), key)
+        }
+    }
+
+    internal fun blteDecode(data: ByteArray, limit: Int = MAX_CHUNK): ByteArray =
+        ByteArrayOutputStream().also { blteDecode(data, it, limit) }.toByteArray()
+
+    private fun blteDecode(data: ByteArray, out: OutputStream, limit: Int, depth: Int = 0): Int {
+        if (limit !in 0..MAX_OBJECT || depth > 4) throw IOException("BLTE decoding limit exceeded")
+        val size = headerSize(data)
+        if (size == 0) {
+            val decoded = decodeChunk(data.copyOfRange(8, data.size), limit, depth)
+            out.write(decoded)
+            return decoded.size
+        }
+        var written = 0
+        val chunks = chunkTable(data, size)
+        val last = chunks.last()
+        if (last.encodedOffset + last.encodedSize != data.size.toLong() ||
+            last.decodedOffset + last.decodedSize > limit
+        ) throw IOException("Invalid BLTE object dimensions")
+        for (chunk in chunks) {
+            val offset = chunk.encodedOffset.toInt()
+            val encoded = data.copyOfRange(offset, offset + chunk.encodedSize)
+            WowDownloadPolicy.verifyMd5(encoded, chunk.md5)
+            val decoded = decodeChunk(encoded, chunk.decodedSize, depth)
+            if (decoded.size != chunk.decodedSize) throw IOException("BLTE chunk length mismatch")
+            out.write(decoded)
+            written += decoded.size
+        }
+        return written
+    }
+
+    private fun decodeChunk(chunk: ByteArray, limit: Int, depth: Int): ByteArray {
+        if (chunk.isEmpty()) throw IOException("Empty BLTE chunk")
         val body = chunk.copyOfRange(1, chunk.size)
         return when (chunk[0].toInt().toChar()) {
-            'N' -> body
-            'Z' -> inflate(body)
-            'F' -> blteDecode(body)
-            else -> throw IOException("Unsupported BLTE chunk mode ${chunk[0].toInt().toChar()}")
+            'N' -> body.also { if (it.size > limit) throw IOException("Oversized BLTE chunk") }
+            'Z' -> inflate(body, limit)
+            'F' -> ByteArrayOutputStream().also { blteDecode(body, it, limit, depth + 1) }.toByteArray()
+            else -> throw IOException("Unsupported BLTE chunk mode")
         }
     }
 
-    private fun inflate(body: ByteArray): ByteArray {
+    private fun inflate(body: ByteArray, limit: Int): ByteArray {
         val inflater = Inflater()
         inflater.setInput(body)
-        val out = ByteArrayOutputStream(body.size * 2)
+        val out = ByteArrayOutputStream()
         val buffer = ByteArray(64 * 1024)
         try {
             while (!inflater.finished()) {
                 val n = inflater.inflate(buffer)
-                if (n == 0 && (inflater.needsInput() || inflater.needsDictionary())) throw IOException("Truncated zlib chunk")
+                if (n == 0 && !inflater.finished()) throw IOException("Truncated zlib chunk")
+                if (out.size() + n > limit) throw IOException("Oversized zlib chunk")
                 out.write(buffer, 0, n)
             }
+            if (inflater.remaining != 0) throw IOException("Unexpected trailing zlib data")
+        } catch (e: java.util.zip.DataFormatException) {
+            throw IOException("Invalid zlib chunk", e)
         } finally {
             inflater.end()
         }

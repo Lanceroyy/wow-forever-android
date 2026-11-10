@@ -1,0 +1,2 @@
+*.sh text eol=lf
+tools/components.sha256 text eol=lf

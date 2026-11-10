@@ -1,3 +1,4 @@
+import java.security.MessageDigest
 import java.util.Properties
 import java.io.FileInputStream
 
@@ -18,6 +19,41 @@ val keystoreProperties: Properties? = if (keystorePropertiesFile.exists()) {
         load(FileInputStream(keystorePropertiesFile))
     }
 } else null
+
+val componentPinsFile = rootProject.layout.projectDirectory.file("tools/components.sha256")
+val componentAssets = layout.projectDirectory.dir("src/main/assets/bundled_components")
+val componentPins = providers.fileContents(componentPinsFile).asText.get().lineSequence()
+    .filter { it.isNotBlank() }
+    .associate { line ->
+        val (hash, name) = line.trim().split(Regex("\\s+"))
+        require(hash.matches(Regex("[a-f0-9]{64}")) && name.matches(Regex("[A-Za-z0-9._-]+[.](zip|wcp)")))
+        name to hash
+    }
+
+val verifyBundledComponents by tasks.registering {
+    inputs.file(componentPinsFile)
+    inputs.dir(componentAssets).optional()
+    doLast {
+        val actualFiles = componentAssets.asFile.listFiles().orEmpty().filter { it.isFile }.map { it.name }.toSet()
+        check(actualFiles == componentPins.keys) { "Unexpected or missing bundled components. Run tools/fetch_components.sh." }
+        componentPins.forEach { (name, expected) ->
+            val digest = MessageDigest.getInstance("SHA-256")
+            componentAssets.file(name).asFile.inputStream().use { input ->
+                val buffer = ByteArray(1024 * 1024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            val actual = digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+            check(actual == expected) { "SHA-256 mismatch for bundled component $name" }
+        }
+    }
+}
+
+tasks.named("preBuild") { dependsOn(verifyBundledComponents) }
+
 
 android {
     namespace = "app.gamenative"
@@ -44,6 +80,7 @@ android {
 
         manifestPlaceholders["screenOrientation"] = "unspecified"
         buildConfigField("boolean", "XR_BUILD", "false")
+        buildConfigField("String", "BUNDLED_COMPONENT_PINS", "\"" + componentPins.entries.joinToString(",") { "${it.key}:${it.value}" } + "\"")
 
         versionCode = 233
         versionName = "2.3.3"
@@ -74,7 +111,7 @@ android {
             "de",      // German
             "uk",      // Ukrainian
             "it",      // Italian
-            "ro",      // Română
+            "ro",      // RomÃ¢nÄƒ
             "pl",      // Polish
             "ru",      // Russian
             "ko",      // Korean
@@ -226,4 +263,5 @@ dependencies {
     testImplementation(libs.zstd.jni)
     testImplementation(libs.orgJson)
     testImplementation(libs.mockwebserver)
+    testImplementation(libs.okhttp.tls)
 }

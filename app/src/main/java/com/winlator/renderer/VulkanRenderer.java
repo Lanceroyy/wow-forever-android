@@ -219,7 +219,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
                                         .setParent(xsc).setName("winlator_game").setOpaque(true).build();
                                     scanoutGameSurface = new android.view.Surface(scanoutGameSC);
                                     scanoutCursorSC = new android.view.SurfaceControl.Builder()
-                                        .setParent(xsc).setName("winlator_cursor").setFormat(1).build();
+                                        .setParent(xsc).setName("winlator_cursor").setFormat(android.graphics.PixelFormat.RGBA_8888).build();
                                     scanoutCursorSurface = new android.view.Surface(scanoutCursorSC);
                                     new android.view.SurfaceControl.Transaction()
                                         .setLayer(scanoutGameSC,   1)
@@ -685,7 +685,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
                         .setParent(xsc).setName("winlator_game").setOpaque(true).build();
                     scanoutGameSurface = new android.view.Surface(scanoutGameSC);
                     scanoutCursorSC = new android.view.SurfaceControl.Builder()
-                        .setParent(xsc).setName("winlator_cursor").setFormat(1).build();
+                        .setParent(xsc).setName("winlator_cursor").setFormat(android.graphics.PixelFormat.RGBA_8888).build();
                     scanoutCursorSurface = new android.view.Surface(scanoutCursorSC);
                     android.view.SurfaceControl.Transaction scTxn =
                         new android.view.SurfaceControl.Transaction()

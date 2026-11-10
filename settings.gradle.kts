@@ -21,3 +21,9 @@ dependencyResolutionManagement {
 
 rootProject.name = "wow-forever-android"
 include(":app")
+
+// Optional, local test app with a UID separate from the launcher.
+if (providers.gradleProperty("securityProbe").orNull == "true") {
+    include(":security-probe")
+    project(":security-probe").projectDir = file("tools/security-probe")
+}
