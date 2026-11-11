@@ -61,6 +61,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     private int outputScalingMode = SCALE_FIT;
     private java.util.concurrent.ExecutorService initExecutor = null;
     private volatile boolean initComplete = false;
+    private volatile java.util.function.Consumer<Boolean> surfaceInitListener;
     private String driverLibraryName = null;
     private String nativeLibDir = null;
     private Drawable rootCursorDrawable;
@@ -177,6 +178,10 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
         }
     }
 
+    public void setSurfaceInitListener(java.util.function.Consumer<Boolean> listener) {
+        surfaceInitListener = listener;
+    }
+
     public void onSurfaceCreated(Surface surface) {
         if (!gpuImageChecked) { GPUImage.checkIsSupported(); gpuImageChecked = true; }
         if (initExecutor != null) {
@@ -253,9 +258,11 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
                     nativeSetVerboseLog(nativeHandle, true);
                     nativeDumpRendererInfo(nativeHandle);
                 }
+                initComplete = nativeHandle != 0;
             }
-            initComplete = true;
-            xServerView.queueEvent(this::updateScene);
+            java.util.function.Consumer<Boolean> listener = surfaceInitListener;
+            if (listener != null) listener.accept(initComplete);
+            if (initComplete) xServerView.queueEvent(this::updateScene);
         });
     }
 

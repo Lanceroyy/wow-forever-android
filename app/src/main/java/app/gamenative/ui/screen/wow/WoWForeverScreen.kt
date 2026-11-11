@@ -1,5 +1,7 @@
 package app.gamenative.ui.screen.wow
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
 import android.os.Environment
@@ -24,6 +26,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -78,7 +81,7 @@ object WoWLauncherState {
     var shouldAutoLaunch = false
 }
 
-private const val CONTAINER_ID = "wow_forever"
+internal const val WOW_CONTAINER_ID = "wow_forever"
 private const val READY_STATUS = "Ready to launch"
 
 @Composable
@@ -95,6 +98,11 @@ fun WoWForeverScreen(
     var launchJob by remember { mutableStateOf<Job?>(null) }
     var region by remember(gamePath, files) { mutableStateOf(GameRegion.current(context, gamePath)) }
     var resolution by remember { mutableStateOf(RenderResolution.current(context, gpu.screenSize)) }
+    var displayRenderer by rememberSaveable {
+        val soc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else ""
+        mutableStateOf(WoWDisplayRenderer.defaultFor(Build.MANUFACTURER, Build.MODEL, soc))
+    }
+    var launchReport by remember { mutableStateOf<String?>(null) }
     var statusText by remember { mutableStateOf(READY_STATUS) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var showStoragePermissionDialog by remember { mutableStateOf(false) }
@@ -212,23 +220,29 @@ fun WoWForeverScreen(
         errorMessage = null
         statusText = "Preparing components..."
 
+        val selectedDisplay = displayRenderer
         launchJob = scope.launch {
+            var report: WoWLaunchReport? = null
             try {
                 val screenSize = fitScreenSizeToWindow(context, resolution.size)
+                report = WoWLaunchReport.begin(gpu.driver, selectedDisplay.label, screenSize)
                 val containerId = withContext(Dispatchers.IO) {
-                    prepareLaunch(context, File(gamePath), gpu, screenSize) { msg ->
+                    prepareLaunch(context, File(gamePath), gpu, screenSize, selectedDisplay) { msg ->
                         scope.launch(Dispatchers.Main) { statusText = msg }
                     }
                 }
+                report?.record("Game files and container prepared")
                 statusText = "Booting into World of Warcraft..."
                 onLaunch(containerId)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: StorageAccessDeniedException) {
+                report?.record("Game storage access denied")
                 isLaunching = false
                 statusText = READY_STATUS
                 denyStorageAccess()
             } catch (e: Exception) {
+                report?.record("Launcher preparation failed")
                 Timber.e(e, "Error launching WoW Forever")
                 errorMessage = e.message ?: "Launch failed"
                 statusText = "Launch failed"
@@ -399,6 +413,21 @@ fun WoWForeverScreen(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(text = "${gpu.edition} Edition", fontSize = 11.sp, color = WowSubtle)
+                if (BuildConfig.DEBUG) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OptionMenu(
+                            "Display: ${displayRenderer.label}",
+                            Icons.Default.AspectRatio,
+                            WoWDisplayRenderer.entries,
+                            displayRenderer,
+                            { it.label },
+                            !isLaunching,
+                        ) { displayRenderer = it }
+                        TextButton(onClick = {
+                            launchReport = WoWLaunchReport.latest?.summary() ?: "Launch WoW to start a report."
+                        }) { Text("Launch Report") }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -653,6 +682,24 @@ fun WoWForeverScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
         }
+    }
+
+    launchReport?.let { report ->
+        AlertDialog(
+            onDismissRequest = { launchReport = null },
+            title = { Text("Launch Report") },
+            text = { Text(report, Modifier.verticalScroll(rememberScrollState())) },
+            confirmButton = {
+                TextButton(onClick = {
+                    context.getSystemService(ClipboardManager::class.java)
+                        .setPrimaryClip(ClipData.newPlainText("WoW launch report", report))
+                    launchReport = null
+                }) { Text("Copy") }
+            },
+            dismissButton = {
+                TextButton(onClick = { launchReport = null }) { Text("Close") }
+            },
+        )
     }
 
     if (showUpgradeDialog) {
@@ -1083,6 +1130,20 @@ private const val ADRENO_8XX_DRIVER = "Turnip-V32-RP6sched"
 private const val PROTON_VERSION = "proton-11.0-90624-arm64ec"
 private const val DXVK_VERSION = "2.4.1-wow-aarch64-test"
 
+internal enum class WoWDisplayRenderer(val id: String, val label: String) {
+    VULKAN(Container.DEFAULT_DISPLAY_RENDERER, "Vulkan"),
+    OPENGL("gl", "OpenGL");
+
+    companion object {
+        fun defaultFor(manufacturer: String, model: String, soc: String): WoWDisplayRenderer {
+            // Use EGL presentation on Galaxy S25 hardware to bypass Vulkan hardware-buffer import.
+            val samsung8Elite = manufacturer.equals("samsung", ignoreCase = true) &&
+                (soc.startsWith("SM8750", ignoreCase = true) || model.startsWith("SM-S936", ignoreCase = true))
+            return if (samsung8Elite) OPENGL else VULKAN
+        }
+    }
+}
+
 private data class GpuProfile(val driver: String, val tuDebug: String, val screenSize: String, val label: String, val edition: String) {
     companion object {
         fun detect(context: Context) = if (isAdreno8xxDevice(context)) {
@@ -1125,7 +1186,14 @@ internal fun fitScreenSize(baseSize: String, windowWidth: Int, windowHeight: Int
     return "${(width / 2).roundToInt() * 2}x${(height / 2).roundToInt() * 2}"
 }
 
-private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, screenSize: String, onStatus: (String) -> Unit): String {
+private fun prepareLaunch(
+    context: Context,
+    gameRoot: File,
+    gpu: GpuProfile,
+    screenSize: String,
+    displayRenderer: WoWDisplayRenderer,
+    onStatus: (String) -> Unit,
+): String {
     BattleNetSignIn.removeLoginFile(gameRoot)
     installBundledComponents(context, onStatus)
 
@@ -1145,31 +1213,41 @@ private fun prepareLaunch(context: Context, gameRoot: File, gpu: GpuProfile, scr
 
     onStatus("Configuring ${gpu.label} container...")
     val containerManager = ContainerManager(context)
-    val config = containerConfig(gameRoot, gpu, screenSize)
-    val container = containerManager.getContainerById(CONTAINER_ID)
+    val config = containerConfig(context, gameRoot, gpu, screenSize, displayRenderer)
+    val container = containerManager.getContainerById(WOW_CONTAINER_ID)
     if (container == null) {
         onStatus("Creating prefix environment (first boot)...")
-        containerManager.createContainer(CONTAINER_ID, config)
+        containerManager.createContainer(WOW_CONTAINER_ID, config)
     } else {
         container.loadData(config)
         container.saveData()
     }
-    check(containerManager.hasContainer(CONTAINER_ID)) { "Container creation failed. Check system storage and logs." }
-    return CONTAINER_ID
+    check(containerManager.hasContainer(WOW_CONTAINER_ID)) { "Container creation failed. Check system storage and logs." }
+    return WOW_CONTAINER_ID
 }
 
-private fun containerConfig(gameRoot: File, gpu: GpuProfile, screenSize: String): JSONObject {
-    val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1" else ""
+private fun containerConfig(
+    context: Context,
+    gameRoot: File,
+    gpu: GpuProfile,
+    screenSize: String,
+    displayRenderer: WoWDisplayRenderer,
+): JSONObject {
+    val samsungEnv = if (Build.MANUFACTURER.equals("samsung", ignoreCase = true) && GPUInformation.isAdreno740(context)) {
+        " FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1"
+    } else {
+        ""
+    }
     val envVars = "WRAPPER_MAX_IMAGE_COUNT=0 ZINK_DESCRIPTORS=lazy ZINK_DEBUG=compact,deck_emu MESA_SHADER_CACHE_DISABLE=false MESA_SHADER_CACHE_MAX_SIZE=512MB mesa_glthread=true WINEESYNC=0 MESA_VK_WSI_PRESENT_MODE=mailbox TU_DEBUG=${gpu.tuDebug} VKD3D_SHADER_MODEL=6_0 PULSE_LATENCY_MSEC=144$samsungEnv"
     return JSONObject().apply {
-        put("id", CONTAINER_ID)
+        put("id", WOW_CONTAINER_ID)
         put("name", "WoW Forever")
         put("screenSize", screenSize)
         put("envVars", envVars)
         put("graphicsDriver", "Wrapper")
         put("graphicsDriverVersion", gpu.driver)
         put("graphicsDriverConfig", "version=${gpu.driver},adrenotoolsTurnip=1,resourceType=buffer,bcnEmulation=auto,quality=high")
-        put("displayRenderer", "vulkan")
+        put("displayRendererMode", displayRenderer.id)
         put("dxwrapper", "dxvk-$DXVK_VERSION-1")
         put("dxwrapperConfig", "version=$DXVK_VERSION-1")
         put("wineVersion", "$PROTON_VERSION-1")
