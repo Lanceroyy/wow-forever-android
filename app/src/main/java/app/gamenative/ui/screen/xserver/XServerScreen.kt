@@ -23,6 +23,7 @@ import android.hardware.input.InputManager
 import android.view.InputDevice
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import app.gamenative.externaldisplay.currentDisplayCompat
 import app.gamenative.BuildConfig
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -105,6 +106,8 @@ import app.gamenative.ui.component.parsePositiveFpsLimit
 import app.gamenative.ui.data.PerformanceHudConfig
 import app.gamenative.ui.data.PerformanceHudSize
 import app.gamenative.ui.data.XServerState
+import app.gamenative.ui.screen.wow.WOW_CONTAINER_ID
+import app.gamenative.ui.screen.wow.WoWLaunchReport
 import app.gamenative.ui.widget.PerformanceHudView
 import app.gamenative.utils.AssetUtils
 import app.gamenative.utils.ContainerUtils
@@ -171,7 +174,6 @@ import com.winlator.xenvironment.components.BionicProgramLauncherComponent
 import com.winlator.xenvironment.components.GlibcProgramLauncherComponent
 import com.winlator.xenvironment.components.GuestProgramLauncherComponent
 import com.winlator.xenvironment.components.NetworkInfoUpdateComponent
-import com.winlator.xenvironment.components.MicrophoneComponent
 import com.winlator.xenvironment.components.PulseAudioComponent
 import com.winlator.xenvironment.components.SysVSharedMemoryComponent
 import com.winlator.xenvironment.components.VirGLRendererComponent
@@ -237,7 +239,7 @@ private fun initialFpsLimiterTarget(container: Container): Int =
 
 private fun detectMaxRefreshRateHz(context: Context, attachedView: View?): Int {
     val display = attachedView?.display
-        ?: context.display
+        ?: context.currentDisplayCompat()
         ?: ContextCompat.getSystemService(context, DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)
 
     val refreshRate = when {
@@ -414,6 +416,7 @@ fun XServerScreen(
     val context = LocalContext.current
     val view = LocalView.current
     val scope = rememberCoroutineScope()
+    val launchReport = remember(appId) { WoWLaunchReport.latest.takeIf { appId == WOW_CONTAINER_ID } }
     val imm = remember(context) {
         context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
     }
@@ -1864,6 +1867,7 @@ fun XServerScreen(
             // other containers as well. Uncheck the per-container useLegacyRenderer
             // setting to switch to the Vulkan renderer.
             val useGLRenderer = container.graphicsDriver == "virgl" || container.displayRenderer.equals("gl", true)
+            launchReport?.record(if (useGLRenderer) "Using OpenGL display" else "Using ${container.displayRenderer} display")
             val xServerViewInstance: XServerRendererView = if (useGLRenderer) {
                 XServerViewGL(context, xServerToUse)
             } else {
@@ -1874,6 +1878,11 @@ fun XServerScreen(
                 setFrameRateLimit(if (fpsLimiterEnabled) fpsLimiterTarget else 0)
                 val renderer = this.renderer
                 if (!useGLRenderer && renderer is VulkanRenderer) {
+                    if (launchReport != null) {
+                        renderer.setSurfaceInitListener { success ->
+                            launchReport.record(if (success) "Vulkan display initialized" else "Vulkan display initialization failed")
+                        }
+                    }
                     renderer.setFrameGenerationArmed(isLsfgAvailable)
                     val pm = container.rendererPresentMode.ifEmpty { "fifo" }
                     val vkMode = when (pm.lowercase(Locale.getDefault())) {
@@ -1888,7 +1897,12 @@ fun XServerScreen(
                     renderer.setSfCompatMode(container.sfCompatMode)
                 }
                 applyMouseCursorVisibility()
+                var recordedFirstGlFrame = false
                 renderer.setOnFrameRenderedListener {
+                    if (launchReport != null && !recordedFirstGlFrame) {
+                        recordedFirstGlFrame = true
+                        launchReport.record("OpenGL display render loop ran")
+                    }
                     if (shouldTrackDisplayedFrames.get()) {
                         val frameTime = SystemClock.elapsedRealtime()
                         (context as? Activity)?.runOnUiThread {
@@ -1939,7 +1953,7 @@ fun XServerScreen(
                 })
 
                 // Add invisible IME receiver to capture system keyboard input when keyboard is on external display
-                val imeDisplayContext = context.display?.let { display ->
+                val imeDisplayContext = context.currentDisplayCompat()?.let { display ->
                     context.createDisplayContext(display)
                 } ?: context
 
@@ -2025,6 +2039,7 @@ fun XServerScreen(
 
                         override fun onUpdateWindowContent(window: Window) {
                             if (!xServerState.value.winStarted && window.isApplicationWindow()) {
+                                launchReport?.record("X11 received application window content")
                                 if (shouldShowMouseCursor()) renderer?.setCursorVisible(true)
                                 xServerState.value.winStarted = true
                             }
@@ -2061,6 +2076,7 @@ fun XServerScreen(
                             val isGameWindow = (targetExecutable.isNotBlank() && windowMatchesExecutable(window, targetExecutable)) ||
                                     (window.isApplicationWindow() && !window.name.equals("shell", ignoreCase = true) && !window.className.contains("explorer", ignoreCase = true))
                             if (isGameWindow) {
+                                launchReport?.record("X11 mapped an application window")
                                 onWindowMapped?.invoke(context, window)
                             }
                         }
@@ -2213,6 +2229,7 @@ fun XServerScreen(
                             changeWineAudioDriver(xServerState.value.audioDriver, container, ImageFs.find(context))
                             setImagefsContainerVariant(context, container)
                             if (isExiting.get()) return@submit
+                            launchReport?.record("Wine and graphics files prepared")
                             PluviaApp.xEnvironment = setupXEnvironment(
                                 context,
                                 appId,
@@ -2223,6 +2240,7 @@ fun XServerScreen(
                                 containerVariantChanged,
                                 onGameLaunchError,
                                 isOffline,
+                                launchReport,
                             )
 
                             if (!PluviaApp.isActivityInForeground && !neverSuspend) {
@@ -2237,6 +2255,7 @@ fun XServerScreen(
                                 }
                             }
                         } catch (e: Exception) {
+                            launchReport?.record("Wine or graphics setup failed (${e.javaClass.simpleName})")
                             Timber.e(e, "Error during wine setup operations")
                             try {
                                 PluviaApp.xEnvironment?.stopEnvironmentComponents()
@@ -3551,6 +3570,7 @@ private fun setupXEnvironment(
     containerVariantChanged: Boolean,
     onGameLaunchError: ((String) -> Unit)? = null,
     offline: Boolean = false,
+    launchReport: WoWLaunchReport? = null,
 ): XEnvironment {
     ProcessHelper.hardKillStaleWineProcesses()
 
@@ -3598,10 +3618,11 @@ private fun setupXEnvironment(
     // explicitly enable or disable Wine debug channels
     envVars.put(
         "WINEDEBUG",
-        if (enableWineDebug && wineDebugChannels.isNotEmpty())
-            "+" + wineDebugChannels.replace(",", ",+")
-        else
-            "-all",
+        when {
+            enableWineDebug && wineDebugChannels.isNotEmpty() -> "+" + wineDebugChannels.replace(",", ",+")
+            launchReport != null -> "-all,err+all"
+            else -> "-all"
+        },
     )
     // capture debug output to file if either Wine or Box86/64 logging is enabled
     var logFile: File? = null
@@ -3614,6 +3635,7 @@ private fun setupXEnvironment(
     }
 
     ProcessHelper.addDebugCallback { line ->
+        launchReport?.observeGuestOutput(line)
         if (captureLogs) {
             logFile?.appendText(line + "\n")
         }
@@ -3707,41 +3729,18 @@ private fun setupXEnvironment(
     environment.addComponent(NetworkInfoUpdateComponent())
 
 
-    // Microphone support is published through PulseAudio (module-pipe-source), which Wine/Proton's
-    // winepulse.drv enumerates as a normal recording device. Opt-in per container.
-    val micEnabled = container.getMicEnabled() && PulseAudioComponent.isMicModuleAvailable(context)
-    if (container.getMicEnabled() && !micEnabled) {
-        Timber.w("Microphone enabled for this container but module-pipe-source.so is missing; skipping")
-    }
-
     if (xServerState.value.audioDriver == "alsa") {
         envVars.put("ANDROID_ALSA_SERVER", imageFs.getRootDir().getPath() + UnixSocketConfig.ALSA_SERVER_PATH)
         envVars.put("ANDROID_ASERVER_USE_SHM", "true")
         val options = ALSAClient.Options.fromKeyValueSet(null)
         environment.addComponent(ALSAServerComponent(UnixSocketConfig.createSocket(imageFs.getRootDir().getPath(), UnixSocketConfig.ALSA_SERVER_PATH), options))
-        if (micEnabled) {
-            // Playback stays on the ALSA server; run PulseAudio in mic-only mode (no AAudio sink, so
-            // no extra output path and no added playback latency) purely to expose the capture device.
-            envVars.put("PULSE_SERVER", imageFs.getRootDir().getPath() + UnixSocketConfig.PULSE_SERVER_PATH)
-            environment.addComponent(PulseAudioComponent(
-                UnixSocketConfig.createSocket(imageFs.getRootDir().getPath(), UnixSocketConfig.PULSE_SERVER_PATH),
-                container.pulseaudioLowLatency,
-                true,
-                false
-            ))
-        }
     } else if (xServerState.value.audioDriver == "pulseaudio") {
         envVars.put("PULSE_SERVER", imageFs.getRootDir().getPath() + UnixSocketConfig.PULSE_SERVER_PATH)
         environment.addComponent(PulseAudioComponent(
             UnixSocketConfig.createSocket(imageFs.getRootDir().getPath(), UnixSocketConfig.PULSE_SERVER_PATH),
             container.pulseaudioLowLatency,
-            micEnabled,
             true
         ))
-    }
-
-    if (micEnabled) {
-        environment.addComponent(MicrophoneComponent(PulseAudioComponent.getMicFifoFile(context)))
     }
 
     if (xServerState.value.graphicsDriver == "virgl") {
@@ -3766,6 +3765,7 @@ private fun setupXEnvironment(
     guestProgramLauncherComponent.envVars = EnvVars().apply { putAll(envVars) }
 
     val gameTerminationCallback = Callback<Int> { status ->
+        launchReport?.record("Wine process exited with status $status")
         if (status != 0) {
             Timber.e("Guest program terminated with status: $status")
             onGameLaunchError?.invoke("Game terminated with error status: $status")
@@ -3804,6 +3804,7 @@ private fun setupXEnvironment(
 
     try {
         environment.startEnvironmentComponents()
+        launchReport?.record("Wine launch requested")
     } catch (e: Exception) {
         Timber.e(e, "Failed to start environment components, cleaning up")
         try {

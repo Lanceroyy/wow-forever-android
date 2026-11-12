@@ -168,10 +168,8 @@ class ImageFsInstallerTest {
         }
 
         assertTrue("Active path should remain a symlink", Files.isSymbolicLink(optVersionLink.toPath()))
-        assertEquals(
-            desiredTarget.canonicalPath,
-            optVersionLink.canonicalFile.absolutePath,
-        )
+        assertTrue("Active link should resolve to the installed Proton directory",
+            Files.isSameFile(desiredTarget.toPath(), optVersionLink.toPath()))
 
         rootDir.deleteRecursively()
     }

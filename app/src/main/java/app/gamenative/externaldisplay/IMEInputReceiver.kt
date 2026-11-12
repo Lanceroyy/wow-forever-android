@@ -72,26 +72,24 @@ class IMEInputReceiver(
         // Disable autocomplete/suggestions so each key commits immediately
         outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or 
                              EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
-                             EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                             EditorInfo.TYPE_TEXT_VARIATION_PASSWORD
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or 
                               EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+                              EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
                               EditorInfo.IME_ACTION_NONE
         
         return object : BaseInputConnection(this, false) {
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                Timber.d("IMEInputReceiver: commitText called with: '$text'")
                 text?.let(::typeText)
                 return true
             }
 
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-                Timber.d("IMEInputReceiver: deleteSurroundingText called")
                 if (beforeLength > 0) {
                     repeat(beforeLength) {
                         xServer.injectKeyPress(com.winlator.xserver.XKeycode.KEY_BKSP, 0)
                         xServer.injectKeyRelease(com.winlator.xserver.XKeycode.KEY_BKSP)
                     }
-                    Timber.v("IMEInputReceiver: Sent backspace x$beforeLength")
                 }
                 return true
             }
@@ -100,7 +98,6 @@ class IMEInputReceiver(
                 if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_DEL) {
                     xServer.injectKeyPress(com.winlator.xserver.XKeycode.KEY_BKSP, 0)
                     xServer.injectKeyRelease(com.winlator.xserver.XKeycode.KEY_BKSP)
-                    Timber.v("IMEInputReceiver: Sent backspace from sendKeyEvent")
                     return true
                 }
                 return super.sendKeyEvent(event)
@@ -149,11 +146,6 @@ class IMEInputReceiver(
             )
             xServer.keyboard.onKeyEvent(upEvent)
 
-            Timber.v(
-                "IMEInputReceiver: Sent char '$char' as keyCode ${keyDispatch.keyCode} (shift=${keyDispatch.requiresShift})",
-            )
-        } else {
-            Timber.w("IMEInputReceiver: Could not map character '$char' to keyCode")
         }
     }
 
