@@ -33,12 +33,14 @@ val componentPins = providers.fileContents(componentPinsFile).asText.get().lineS
 val verifyBundledComponents by tasks.registering {
     inputs.file(componentPinsFile)
     inputs.dir(componentAssets).optional()
+    val assets = componentAssets
+    val pins = componentPins
     doLast {
-        val actualFiles = componentAssets.asFile.listFiles().orEmpty().filter { it.isFile }.map { it.name }.toSet()
-        check(actualFiles == componentPins.keys) { "Unexpected or missing bundled components. Run tools/fetch_components.sh." }
-        componentPins.forEach { (name, expected) ->
+        val actualFiles = assets.asFile.listFiles().orEmpty().filter { it.isFile }.map { it.name }.toSet()
+        check(actualFiles == pins.keys) { "Unexpected or missing bundled components. Run tools/fetch_components.sh." }
+        pins.forEach { (name, expected) ->
             val digest = MessageDigest.getInstance("SHA-256")
-            componentAssets.file(name).asFile.inputStream().use { input ->
+            assets.file(name).asFile.inputStream().use { input ->
                 val buffer = ByteArray(1024 * 1024)
                 while (true) {
                     val count = input.read(buffer)

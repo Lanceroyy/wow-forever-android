@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -78,7 +79,7 @@ class ContainerOverlayFilesTest {
         assertEquals("BBBB", protonFile.readText())
 
         assertEquals(ContainerOverlay.canonicalHostPath(base), container.basePrefix)
-        assertEquals(base.canonicalPath, container.basePrefix)
+        assertEquals(base.toPath().toRealPath().toString(), container.basePrefix)
         assertTrue(container.isOverlay)
         assertEquals("", container.getExtra("dedupeVersion"))
         assertFalse(exists(File(upper, ".gnoverlay/wh")))
@@ -97,8 +98,7 @@ class ContainerOverlayFilesTest {
         val container = bionicContainer(root)
         ContainerOverlayMigrator.migrate(container, viaSymlink, emptyList())
 
-        assertEquals(base.canonicalPath, container.basePrefix)
-        assertFalse(container.basePrefix.contains("/imagefs/opt/"))
+        assertEquals(base.toPath().toRealPath().toString(), container.basePrefix)
     }
 
     @Test
@@ -213,36 +213,35 @@ class ContainerOverlayFilesTest {
     @Test
     fun createThinPrefix_marksDosdevicesOpaque() {
         val base = tmp.newFolder("base", ".wine")
-        Files.createDirectories(File(base, "dosdevices").toPath())
-        Files.createSymbolicLink(File(base, "dosdevices/c:").toPath(), Paths.get("../drive_c"))
-        Files.createSymbolicLink(File(base, "dosdevices/d:").toPath(), Paths.get("/sdcard/Download"))
+        write(base, "dosdevices/retained", "kept mapping")
+        val removed = write(base, "dosdevices/removed", "deleted mapping")
         val upper = File(tmp.newFolder("container"), ".wine")
 
         assertTrue(ContainerOverlay.createThinPrefix(base, upper))
-        Files.delete(File(upper, "dosdevices/d:").toPath())
+        Files.delete(File(upper, "dosdevices/removed").toPath())
 
         assertTrue(Files.isRegularFile(File(upper, ".gnoverlay/opaque/dosdevices").toPath()))
-        assertNull(ContainerFiles.resolve(upper, base, "dosdevices/d:"))
-        assertTrue(Files.isSymbolicLink(ContainerFiles.resolve(upper, base, "dosdevices/c:")!!.toPath()))
-        assertEquals(File(upper, "dosdevices/c:"), ContainerFiles.resolve(upper, base, "dosdevices/c:"))
+        assertTrue(removed.isFile)
+        assertNull(ContainerFiles.resolve(upper, base, "dosdevices/removed"))
+        assertEquals(File(upper, "dosdevices/retained"), ContainerFiles.resolve(upper, base, "dosdevices/retained"))
     }
 
     @Test
     fun migrate_marksDosdevicesOpaque() {
         val base = tmp.newFolder("base", ".wine")
-        Files.createDirectories(File(base, "dosdevices").toPath())
-        Files.createSymbolicLink(File(base, "dosdevices/e:").toPath(), Paths.get("/sdcard"))
+        write(base, "dosdevices/base-mapping", "base mapping")
         val root = tmp.newFolder("container")
         Files.createDirectories(File(root, ".wine/dosdevices").toPath())
 
         ContainerOverlayMigrator.migrate(bionicContainer(root), base, emptyList())
 
         assertTrue(Files.isRegularFile(File(root, ".wine/.gnoverlay/opaque/dosdevices").toPath()))
-        assertNull(ContainerFiles.resolve(File(root, ".wine"), base, "dosdevices/e:"))
+        assertNull(ContainerFiles.resolve(File(root, ".wine"), base, "dosdevices/base-mapping"))
     }
 
     @Test
     fun basePrefix_normalizeKeepsOnlyCAndZDrives() {
+        assumeTrue("Wine drive names contain colons, which Windows forbids", File.separatorChar == '/')
         val wine = tmp.newFolder("base_prefix", ".wine")
         val dosdevices = File(wine, "dosdevices").apply { mkdirs() }
         Files.createSymbolicLink(File(dosdevices, "c:").toPath(), Paths.get("../drive_c"))
@@ -258,6 +257,7 @@ class ContainerOverlayFilesTest {
 
     @Test
     fun basePrefix_upgradesVersion2BaseByTrimmingDosdevices() {
+        assumeTrue("Wine drive names contain colons, which Windows forbids", File.separatorChar == '/')
         val baseDir = tmp.newFolder("base_prefix")
         val dosdevices = File(baseDir, ".wine/dosdevices").apply { mkdirs() }
         Files.createSymbolicLink(File(dosdevices, "c:").toPath(), Paths.get("../drive_c"))
@@ -275,20 +275,20 @@ class ContainerOverlayFilesTest {
     fun createThinPrefix_copiesSkeletonFromBase() {
         val base = tmp.newFolder("base", ".wine")
         write(base, "system.reg", "sys")
-        write(base, "user.reg", "usr")
+        val userRegistry = write(base, "user.reg", "usr")
         write(base, "userdef.reg", "def")
         write(base, "drive_c/users/xuser/Documents/readme.txt", "doc")
         write(base, "drive_c/windows/system32/kernel32.dll", "k32")
         Files.createDirectories(File(base, "dosdevices").toPath())
-        Files.createSymbolicLink(File(base, "dosdevices/c:").toPath(), Paths.get("../drive_c"))
-        Files.createSymbolicLink(File(base, "dosdevices/z:").toPath(), Paths.get("/"))
+        val relativeTarget = Paths.get("..", "system.reg")
+        Files.createSymbolicLink(File(base, "dosdevices/relative").toPath(), relativeTarget)
+        Files.createSymbolicLink(File(base, "dosdevices/absolute").toPath(), userRegistry.toPath())
         val upper = File(tmp.newFolder("container"), ".wine")
 
         assertTrue(ContainerOverlay.createThinPrefix(base, upper))
 
-        assertTrue(Files.isSymbolicLink(File(upper, "dosdevices/c:").toPath()))
-        assertEquals("../drive_c", Files.readSymbolicLink(File(upper, "dosdevices/c:").toPath()).toString())
-        assertEquals("/", Files.readSymbolicLink(File(upper, "dosdevices/z:").toPath()).toString())
+        assertEquals(relativeTarget, Files.readSymbolicLink(File(upper, "dosdevices/relative").toPath()))
+        assertEquals(userRegistry.toPath(), Files.readSymbolicLink(File(upper, "dosdevices/absolute").toPath()))
         assertEquals("sys", File(upper, "system.reg").readText())
         assertEquals("usr", File(upper, "user.reg").readText())
         assertEquals("def", File(upper, "userdef.reg").readText())

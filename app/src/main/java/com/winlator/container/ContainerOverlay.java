@@ -70,14 +70,18 @@ public final class ContainerOverlay {
     }
 
     public static String canonicalHostPath(File file) {
-        String path;
         try {
-            path = file.getCanonicalPath();
+            return normalizeDataPath(file.toPath().toRealPath().toString());
+        }
+        catch (IOException ignored) {
+            // A path that does not exist yet can still be canonicalized.
+        }
+        try {
+            return normalizeDataPath(file.getCanonicalPath());
         }
         catch (IOException e) {
-            path = file.getAbsolutePath();
+            return normalizeDataPath(file.getAbsolutePath());
         }
-        return normalizeDataPath(path);
     }
 
     public static List<String> aliases(String upper, String imageFsRoot, String imageFsShared) {
