@@ -536,5 +536,28 @@ class SnapshotControlBoundaryTests(unittest.TestCase):
             self.assertIsNone(run.call_args.args[0].snapshot_control_dex)
 
 
+class StockComparatorOptionTests(unittest.TestCase):
+    def test_stock_comparator_keeps_exact_selected_graphics_stage(self):
+        for stage in ('d3d', 'game'):
+            with self.subTest(stage=stage), patch('sys.argv', ['lab', '--main', 'main', '--qa', 'qa',
+                    '--hal', 'hal', '--stage', stage, '--stock-graphics']), \
+                    patch.object(lab, 'verify_input'), patch.object(lab, 'run_lab', return_value=0) as run:
+                self.assertEqual(lab.main(), 0)
+                self.assertTrue(run.call_args.args[0].stock_graphics)
+                self.assertEqual(run.call_args.args[0].stage, stage)
+                self.assertIsNone(run.call_args.args[0].snapshot_control_dex)
+
+    def test_stock_comparator_rejects_other_modes_and_snapshot_mutation(self):
+        for options in (['--stage', 'native'], ['--stage', 'tls'],
+                        ['--stage', 'd3d', '--snapshot-control-dex', 'lab.dex']):
+            with self.subTest(options=options), patch('sys.argv', ['lab', '--main', 'absent', '--qa', 'absent',
+                    '--hal', 'absent', '--stock-graphics'] + options), \
+                    patch.object(lab, 'verify_input') as verify, patch.object(lab, 'run_lab') as run, \
+                    patch('sys.stdout', new_callable=io.StringIO):
+                self.assertEqual(lab.main(), 2)
+                verify.assert_not_called()
+                run.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

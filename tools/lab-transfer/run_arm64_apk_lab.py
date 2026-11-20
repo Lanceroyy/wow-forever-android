@@ -665,10 +665,15 @@ def main():
     parser.add_argument('--hal', required=True, type=Path)
     parser.add_argument('--snapshot-control-dex', type=Path,
                         help='Optional pinned lab-only TaskSnapshot API helper, D3D/game only')
+    parser.add_argument('--stock-graphics', action='store_true',
+                        help='D3D/game comparator using one unchanged stock graphics boot')
     parser.add_argument('--stage', choices=('native', 'd3d', 'tls', 'game', 'all'), default='native')
     args = parser.parse_args()
     if args.stage not in ('native', 'd3d', 'tls', 'game'):
         print(json.dumps({'passed': False, 'scope': 'Requested later stage is not implemented; no lab started'}))
+        return 2
+    if args.stock_graphics and (args.stage not in ('d3d', 'game') or args.snapshot_control_dex is not None):
+        print(json.dumps({'passed': False, 'scope': 'Stock comparator is D3D/game only and excludes snapshot control; no lab started'}))
         return 2
     if args.snapshot_control_dex is not None:
         if args.stage not in ('d3d', 'game'):
@@ -1018,7 +1023,7 @@ def run_lab(args):
         assert os.sysconf('SC_PAGE_SIZE') == 4096
         assert docker[0] is not None
         hal = (sibling('receive_public_hal').receive(lab_args.hal, work / 'hal')
-               if lab_args.stage in ('d3d', 'game') else None)
+               if lab_args.stage in ('d3d', 'game') and not lab_args.stock_graphics else None)
         modprobe = shutil.which('modprobe')
         modinfo = shutil.which('modinfo')
         assert modprobe is not None and modinfo is not None
@@ -1160,7 +1165,7 @@ def run_lab(args):
         assert identity['Id'] == expected_image_id and identity['Architecture'] == 'arm64'
         assert identity['Os'] == 'linux' and image in identity['RepoDigests']
         report['pinned_image_id'] = identity['Id']
-        if lab_args.stage in ('native', 'tls'):
+        if lab_args.stage in ('native', 'tls') or lab_args.stock_graphics:
             selected_profile = boot_profile('stock', 'bridge', [], 90)
         else:
             stock = boot_profile('stock', 'none', [], 90)

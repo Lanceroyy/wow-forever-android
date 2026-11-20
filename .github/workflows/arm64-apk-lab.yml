@@ -19,6 +19,10 @@ name: Native ARM64 APK lab
         description: Disable optional task snapshots in the disposable graphics lab
         type: boolean
         default: false
+      stock_graphics:
+        description: Compare D3D11 or WoW on stock Android graphics
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -101,18 +105,22 @@ jobs:
         env:
           LAB_STAGE: ${{ matrix.stage }}
           LAB_DISABLE_TASK_SNAPSHOTS: ${{ inputs.disable_task_snapshots }}
+          LAB_STOCK_GRAPHICS: ${{ inputs.stock_graphics }}
         run: |
           set -euo pipefail
           inputs_dir="$RUNNER_TEMP/wow-native-lab-inputs"
-          snapshot_args=()
+          lab_options=()
           if [[ "$LAB_DISABLE_TASK_SNAPSHOTS" == true && ( "$LAB_STAGE" == d3d || "$LAB_STAGE" == game ) ]]; then
             snapshot_dir="$RUNNER_TEMP/wow-snapshot-control"
             python3 -I tools/lab-transfer/build_lab_snapshot_control.py "$snapshot_dir"
-            snapshot_args=(--snapshot-control-dex "$snapshot_dir/classes.dex")
+            lab_options+=(--snapshot-control-dex "$snapshot_dir/classes.dex")
+          fi
+          if [[ "$LAB_STOCK_GRAPHICS" == true && ( "$LAB_STAGE" == d3d || "$LAB_STAGE" == game ) ]]; then
+            lab_options+=(--stock-graphics)
           fi
           sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             /usr/bin/python3 -I "$GITHUB_WORKSPACE/tools/lab-transfer/run_arm64_apk_lab.py" \
             --main "$inputs_dir/main.apk" \
             --qa "$inputs_dir/qa.apk" \
             --hal "$inputs_dir/candidate-public-build.tar.gz" \
-            --stage "$LAB_STAGE" "${snapshot_args[@]}"
+            --stage "$LAB_STAGE" "${lab_options[@]}"
