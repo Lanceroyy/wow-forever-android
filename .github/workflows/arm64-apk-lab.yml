@@ -1,0 +1,86 @@
+name: Native ARM64 APK lab
+
+"on":
+  push:
+    branches: [security/hardening-v1]
+    paths: [.github/workflows/arm64-apk-lab.yml]
+  workflow_dispatch:
+    inputs:
+      draft_release_id:
+        description: Numeric ID of the approved unpublished draft
+        type: string
+        required: true
+      stage:
+        description: Test stage
+        type: choice
+        options: [access, native, d3d, tls, prelogin-probes]
+        default: native
+
+permissions:
+  contents: read
+
+jobs:
+  verify-sources:
+    if: >-
+      github.event_name == 'push' && github.repository_id == '1451984864' &&
+      github.ref == 'refs/heads/security/hardening-v1'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Test the lab helper source
+        run: python3 -m unittest discover -s tools/lab-transfer -p 'test_*.py'
+
+  verify-draft:
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.repository_id == '1451984864' &&
+      github.actor_id == '93947654' && github.ref == 'refs/heads/security/hardening-v1'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify built-in token can read the approved draft
+        timeout-minutes: 3
+        env:
+          LAB_JOB_TOKEN: ${{ github.token }}
+          LAB_RELEASE_ID: ${{ inputs.draft_release_id }}
+        run: python3 -I tools/lab-transfer/download_lab_inputs.py
+
+  apk-lab:
+    needs: verify-draft
+    if: inputs.stage == 'native' || inputs.stage == 'd3d' || inputs.stage == 'tls' || inputs.stage == 'prelogin-probes'
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: ${{ fromJSON(inputs.stage == 'prelogin-probes' && '["native", "d3d", "tls"]' || format('["{0}"]', inputs.stage)) }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify draft manifest and download pinned inputs
+        timeout-minutes: 8
+        env:
+          LAB_JOB_TOKEN: ${{ github.token }}
+          LAB_RELEASE_ID: ${{ inputs.draft_release_id }}
+        run: |
+          python3 -I tools/lab-transfer/download_lab_inputs.py \
+            --output "$RUNNER_TEMP/wow-native-lab-inputs"
+      - name: Run the selected checks on the exact APK
+        shell: bash
+        env:
+          LAB_STAGE: ${{ matrix.stage }}
+        run: |
+          set -euo pipefail
+          inputs_dir="$RUNNER_TEMP/wow-native-lab-inputs"
+          sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            /usr/bin/python3 -I "$GITHUB_WORKSPACE/tools/lab-transfer/run_arm64_apk_lab.py" \
+            --main "$inputs_dir/main.apk" \
+            --qa "$inputs_dir/qa.apk" \
+            --hal "$inputs_dir/candidate-public-build.tar.gz" \
+            --stage "$LAB_STAGE"

@@ -2,8 +2,8 @@
 """Owned native ARM64 Android component lab. Preparation only until reviewed.
 
 Consumes three already downloaded local pinned inputs. It never downloads private
-artifacts or receives an owner token. The first implemented stage is native9;
-D3D, TLS and game stages remain explicitly unavailable until integrated/reviewed.
+artifacts or receives an owner token. Select one isolated native9, D3D11 device,
+or Wine certificate stage. Game and actual login/input stages are unavailable.
 """
 import argparse
 import hashlib
@@ -145,6 +145,143 @@ def component_tests(docker, cid, command, bootenv, deadline):
             'stages': results}
 
 
+def runtime_diagnostics(stage, text):
+    """Export only fixed probe identities and bounded numeric fields, never text."""
+    schemas = {
+        'd3d': (
+            ('load', r'LOAD_(DXGI|D3D11) ok=([01]) error=([0-9]{1,10})',
+             ('module', 'ok', 'error'), (str, int, int)),
+            ('factory', r'FACTORY attempted=([01]) hr=0x([0-9a-fA-F]{8}) object=([01])',
+             ('attempted', 'hr', 'object'), (int, lambda x: int(x, 16), int)),
+            ('adapter', r'ADAPTER attempted=([01]) hr=0x([0-9a-fA-F]{8}) object=([01]) '
+             r'desc_attempted=([01]) desc_hr=0x([0-9a-fA-F]{8}) vendor=([0-9]{1,10}) '
+             r'device=([0-9]{1,10}) flags=([0-9]{1,10})',
+             ('attempted', 'hr', 'object', 'desc_attempted', 'desc_hr', 'vendor', 'device', 'flags'),
+             (int, lambda x: int(x, 16), int, int, lambda x: int(x, 16), int, int, int)),
+            ('device', r'(DEFAULT|EXPLICIT) attempted=([01]) hr=0x([0-9a-fA-F]{8}) '
+             r'feature=0x([0-9a-fA-F]{8}) device=([01]) context=([01])',
+             ('route', 'attempted', 'hr', 'feature', 'device', 'context'),
+             (str, int, lambda x: int(x, 16), lambda x: int(x, 16), int, int)),
+        ),
+        'tls': (
+            ('certificate', r'(TRUSTED|UNTRUSTED|EXPIRED|HOSTNAME|SELF_SIGNED) '
+             r'status=([0-9]{1,10}) error=([0-9]{1,10}) certificate_flags=([0-9]{1,10})',
+             ('case', 'status', 'error', 'certificate_flags'), (str, int, int, int)),
+        ),
+    }
+    records = []
+    matched = 0
+    for line in text.splitlines():
+        for kind, pattern, fields, conversions in schemas[stage]:
+            match = re.fullmatch(pattern, line)
+            if match:
+                matched += 1
+                if len(records) < 32:
+                    records.append({'kind': kind, **{
+                        key: conversion(value) for key, conversion, value
+                        in zip(fields, conversions, match.groups())}})
+                break
+    markers = (
+        ('WOW_D3D11_PROBE_V1', 'WOW_D3D11_PROBE_PASS', 'WOW_D3D11_PROBE_FAIL',
+         'D3D_DIAGNOSTIC_UPPER_PAIR_BYTES_VERIFIED_NOT_LOADED_PE_ATTESTATION',
+         'D3D_LIVE_PARTIAL_NUMERIC_SNAPSHOT_NOT_SUCCESS',
+         'D3D_POST_KILL_PARTIAL_NUMERIC_SNAPSHOT_NOT_SUCCESS') if stage == 'd3d' else
+        ('WINE_TLS_PASS', 'WINE_TLS_FAIL', 'WINE_TLS_EXTENDED_PASS',
+         'WINE_TLS_EXTENDED_FAIL', 'HANDHELD_INSTALLED_WINE_TLS_PASS'))
+    lines = text.splitlines()
+    return {'numeric_records': records, 'numeric_records_truncated': matched > len(records),
+            'fixed_markers_observed': {marker: marker in lines for marker in markers},
+            'preparation_status_observed': any(line.startswith('Preparation: ') for line in lines),
+            'session_status_observed': any(line.startswith('Session: ') for line in lines)}
+
+
+def runtime_test(stage, docker, cid, command, bootenv, deadline):
+    """One real installed-runtime fixture; selected-tag output stays private."""
+    classname, flag, tag, seconds, scope = {
+        'd3d': ('HandheldD3dProbeTest', 'handheldD3dProbe', 'HandheldD3dProbe', 600,
+                'Actual Wine D3D11 default-hardware and actual-adapter FL11_0 device creation; '
+                'not game presentation or loaded-PE attestation'),
+        'tls': ('HandheldWineTlsTest', 'handheldWineTls', 'HandheldWineTlsTest', 900,
+                'Actual installed Wine certificate matrix and seven mapped-library identities; '
+                'no game, login, or account input'),
+    }[stage]
+    started = time.monotonic()
+    result = {'stage': stage, 'scope': scope, 'passed': False, 'timings_seconds': {},
+              'milestones': {'fresh_process': False, 'main_log_reset': False,
+                             'instrumentation_started': False, 'selected_tag_captured': False},
+              'credential_use_approved': False}
+    prefix = docker + ['exec']
+    for key, value in bootenv.items():
+        prefix += ['--env', key + '=' + value]
+    prefix += [cid]
+    phase = 'fresh_process'
+    try:
+        before = time.monotonic()
+        for package in (PACKAGE + '.test', PACKAGE):
+            stopped = command(prefix + ['/system/bin/am', 'force-stop', package], 15)
+            if stopped.returncode:
+                raise ValueError('Owned package force-stop failed')
+            until = min(deadline, time.monotonic() + 5)
+            while time.monotonic() < until:
+                probe = command(prefix + ['/system/bin/pidof', package], 5)
+                if probe.returncode == 1 and not probe.stdout.strip():
+                    break
+                if probe.returncode != 0 or not re.fullmatch(r'[0-9 ]+', probe.stdout.strip()):
+                    raise ValueError('Owned package PID check was not conclusive')
+                time.sleep(0.2)
+            else:
+                raise ValueError('Owned package process survived force-stop')
+        result['milestones']['fresh_process'] = True
+        result['timings_seconds']['fresh_process'] = round(time.monotonic() - before, 3)
+        phase = 'log_reset'
+        before = time.monotonic()
+        cleared = command(docker + ['exec', cid, '/system/bin/logcat', '-b', 'main', '-c'], 10)
+        if cleared.returncode:
+            raise ValueError('Fresh selected-log boundary unavailable')
+        result['milestones']['main_log_reset'] = True
+        result['timings_seconds']['log_reset'] = round(time.monotonic() - before, 3)
+        remaining = deadline - time.monotonic() - 45
+        if remaining <= 0:
+            raise TimeoutError()
+        phase = 'instrumentation'
+        before = time.monotonic()
+        result['milestones']['instrumentation_started'] = True
+        output, exit_code, timed_out, output_limit = bounded_capture(
+            prefix + ['/system/bin/am', 'instrument', '-w', '-r', '-e', 'class',
+                      'app.gamenative.security.' + classname, '-e', flag, 'true', RUNNER],
+            min(seconds, remaining))
+        result['timings_seconds']['instrumentation'] = round(time.monotonic() - before, 3)
+        result.update({'instrumentation_exit_code': exit_code, 'transport_timed_out': timed_out,
+                       'output_limit_reached': output_limit})
+        phase = 'selected_tag_capture'
+        before = time.monotonic()
+        remaining = deadline - before - 25
+        if remaining <= 0:
+            raise TimeoutError()
+        log, log_exit, log_timeout, log_limit = bounded_capture(
+            docker + ['exec', cid, '/system/bin/logcat', '-b', 'main', '-d', '-v', 'raw',
+                      '-s', tag + ':I', '*:S'], min(15, remaining))
+        result['timings_seconds']['selected_tag_capture'] = round(time.monotonic() - before, 3)
+        log_complete = log_exit == 0 and not log_timeout and not log_limit
+        result['milestones']['selected_tag_captured'] = log_complete
+        result.update({'selected_log_exit_code': log_exit, 'selected_log_timed_out': log_timeout,
+                       'selected_log_output_limit_reached': log_limit})
+        phase = 'result_verification'
+        # This specialized verifier is mandatory; JUnit completion alone is insufficient.
+        verified = sibling('verify_apk_lab_results').summarize(stage, output, log, exit_code=exit_code)
+        result['verification'] = verified
+        result['diagnostics'] = runtime_diagnostics(stage, log)
+        result['passed'] = verified['passed'] and not timed_out and not output_limit and log_complete
+        if not result['passed']:
+            result['failure_phase'] = 'result_verification'
+    except Exception as failure:
+        result['failure_phase'] = phase
+        result['error_class'] = type(failure).__name__ if type(failure).__name__ in (
+            'ValueError', 'TimeoutError', 'TimeoutExpired', 'OSError', 'RuntimeError') else 'OtherError'
+    result['timings_seconds']['total'] = round(time.monotonic() - started, 3)
+    return result
+
+
 def prepare_cache_overlay(docker, image, expected_image_id, work, owner, command):
     """Read one pinned public file from an owned container that is never started."""
     name = 'wow-arm64-properties-' + owner[:16]
@@ -208,7 +345,7 @@ def prepare_cache_overlay(docker, image, expected_image_id, work, owner, command
 
 
 def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline):
-    """Actual fixed input installs and platform loader proof before native9."""
+    """Actual fixed input installs and platform loader proof before a selected stage."""
     def checked_android(values, seconds=20):
         value = command(docker + ['exec', cid] + values, seconds)
         if value.returncode:
@@ -256,7 +393,8 @@ def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline
         if checked_android(['/system/bin/sha256sum', base]).split()[0] != expected:
             raise ValueError('Installed base APK bytes differ')
         installed[package] = expected
-    result = component_tests(docker, cid, command, bootenv, deadline)
+    result = (component_tests(docker, cid, command, bootenv, deadline) if args.stage == 'native' else
+              runtime_test(args.stage, docker, cid, command, bootenv, deadline))
     result['installed_apk_sha256'] = installed
     result['public_namespace_sha256'] = expected_namespace
     result['nine_public_hal_files_hash_checked_and_mapped'] = True
@@ -271,7 +409,7 @@ def main():
     parser.add_argument('--hal', required=True, type=Path)
     parser.add_argument('--stage', choices=('native', 'd3d', 'tls', 'game', 'all'), default='native')
     args = parser.parse_args()
-    if args.stage != 'native':
+    if args.stage not in ('native', 'd3d', 'tls'):
         print(json.dumps({'passed': False, 'scope': 'Requested later stage is not implemented; no lab started'}))
         return 2
     verify_input(args.main, 129571767, MAIN_SHA)
@@ -305,7 +443,10 @@ def run_lab(args):
     started = time.monotonic()
     deadline = started + 1500
     cid = None
-    report = {'scope': 'Native ARM64 JNI and protected generated GL only; not a game/login/credential verdict',
+    report = {'scope': ('Native ARM64 JNI and protected generated GL only; not a game/login/credential verdict'
+                        if lab_args.stage == 'native' else
+                        'Selected actual installed Wine ' + lab_args.stage + ' stage; not a game/login/credential verdict'),
+              'selected_stage': lab_args.stage,
               'boot_only_pass': False, 'passed': False, 'hal_overlays': True, 'account_input_sent': False,
               'adb_published': False, 'owned_container_removed': False,
               'owned_binderfs_unmounted': False, 'phase': 'kernel_modules'}
@@ -642,14 +783,19 @@ def run_lab(args):
             report['wms_responsive'] and report['display_ready'] and report['system_booted'])
         if not report['boot_only_pass']:
             raise RuntimeError('Actual platform readiness failed')
-        report['phase'] = 'native_components'
+        report['phase'] = 'native_components' if lab_args.stage == 'native' else 'installed_runtime_test'
         bootenv = boot_environment(docker, cid, command)
         report['public_boot_environment_keys'] = sorted(bootenv)
-        report['native_components'] = installed_component_stage(docker, cid, command, bootenv, hal, lab_args, deadline)
-        report['native_component9_pass'] = report['native_components']['passed']
-        if not report['native_component9_pass']:
-            raise RuntimeError('Actual native component stage failed')
-        report['unimplemented_stages'] = ['d3d', 'tls', 'game', 'unsent_input']
+        selected = installed_component_stage(docker, cid, command, bootenv, hal, lab_args, deadline)
+        if lab_args.stage == 'native':
+            report['native_components'] = selected
+            report['native_component9_pass'] = selected['passed']
+        else:
+            report['installed_runtime_test'] = selected
+            report['installed_runtime_test_pass'] = selected['passed']
+        if not selected['passed']:
+            raise RuntimeError('Actual selected component stage failed')
+        report['unimplemented_stages'] = ['game', 'unsent_input']
         report['phase'] = 'complete'
     except Exception as failure:
         report['incomplete'] = True
@@ -680,7 +826,8 @@ def run_lab(args):
         report['ephemeral_stock_data_retained_on_disposable_runner'] = True
         report['passed'] = (report['phase'] == 'complete' and not report.get('incomplete', False)
                             and not report.get('error_class') and report['boot_only_pass']
-                            and report.get('native_component9_pass', False)
+                            and (report.get('native_component9_pass', False) if lab_args.stage == 'native'
+                                 else report.get('installed_runtime_test_pass', False))
                             and report['owned_container_removed'] and report['owned_binderfs_unmounted'])
         print(json.dumps(report, sort_keys=True))
     return 0 if report['passed'] else 1
