@@ -6,7 +6,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 spec = importlib.util.spec_from_file_location(
@@ -156,10 +156,10 @@ def runtime_command(log_reset_exit=0, stop_exit=0):
 
 
 class InstalledRuntimeStageTests(unittest.TestCase):
-    def run_stage(self, stage, captures, expected_system_server=None, **command_options):
+    def run_stage(self, stage, captures, expected_system_server=None, frame_scope=None, **command_options):
         with patch.object(lab, 'bounded_capture', side_effect=[*captures, ('', 0, False, False)]) as capture:
             result = lab.runtime_test(stage, ['docker'], 'cid', runtime_command(**command_options),
-                                      {'ANDROID_ROOT': '/system'}, 10**12, expected_system_server)
+                                      {'ANDROID_ROOT': '/system'}, 10**12, expected_system_server, frame_scope)
         return result, capture
 
     def test_exact_fixtures_and_specialized_contracts_pass_separately(self):
@@ -274,6 +274,46 @@ class InstalledRuntimeStageTests(unittest.TestCase):
             self.assertNotIn(forbidden, args)
         self.assertEqual(capture.call_args_list[0].args[1], 2100)
         self.assertEqual(result['verification']['game_frames_captured'], 3)
+
+    def test_frame_inspection_uses_only_the_current_verified_receipt(self):
+        scope = {'data_root': Path('private-data'), 'data_identity': (9, 17),
+                 'owner_marker': Path('private-owner'), 'owner': 'private-owner-value'}
+        for analysis_complete in (True, False):
+            with self.subTest(analysis_complete=analysis_complete):
+                measurements = {'analysis_complete': analysis_complete}
+                examine = Mock(return_value=measurements)
+                load_sibling = lab.sibling
+                def load(name):
+                    if name == 'verify_game_frame_content':
+                        return SimpleNamespace(verify_game_frame_content=examine)
+                    return load_sibling(name)
+
+                log = 'INTRUSIVE unrelated-capture.json\n' + runtime_log('game')
+                with patch.object(lab, 'sibling', side_effect=load):
+                    result, capture = self.run_stage('game', [(runtime_junit('game'), 0, False, False),
+                                                            (log, 0, False, False)], frame_scope=scope)
+                examine.assert_called_once_with(receipt_basename='handheld-game-captures-123.json',
+                                                deadline=10**12 - 25, **scope)
+                self.assertEqual(result['game_frame_content'], measurements)
+                self.assertEqual(result['passed'], analysis_complete)
+                self.assertTrue(result['automated_game_capture_passed'])
+                self.assertFalse(result['visible_login_confirmed'])
+                self.assertFalse(result['dummy_input_test_completed'])
+                self.assertFalse(result['credential_use_approved'])
+                self.assertNotIn('private-owner', json.dumps(result))
+                self.assertNotIn('handheld-game-captures-123.json', json.dumps(result))
+                self.assertEqual(capture.call_count, 2)
+                if not analysis_complete:
+                    self.assertEqual(result['failure_phase'], 'game_frame_content')
+
+    def test_failed_capture_does_not_read_owned_files_for_inspection(self):
+        with patch.object(lab, 'sibling', wraps=lab.sibling) as load:
+            result, _ = self.run_stage('game', [(runtime_junit('game'), 0, False, False),
+                                               (runtime_log('game'), 1, False, False)], frame_scope={})
+        self.assertFalse(result['passed'])
+        self.assertFalse(result['automated_game_capture_passed'])
+        self.assertFalse(result['game_frame_content']['analysis_complete'])
+        self.assertNotIn('verify_game_frame_content', [call.args[0] for call in load.call_args_list])
 
     def test_unclassified_game_diagnostic_cannot_pass_as_game_frames(self):
         result, _ = self.run_stage('game', [(runtime_junit('game'), 0, False, False),
@@ -557,6 +597,20 @@ class StockComparatorOptionTests(unittest.TestCase):
                 self.assertEqual(lab.main(), 2)
                 verify.assert_not_called()
                 run.assert_not_called()
+
+    def test_frame_inspection_is_optional_and_accepts_only_game(self):
+        common = ['lab', '--main', 'main', '--qa', 'qa', '--hal', 'hal']
+        for stage in ('game', 'd3d', 'tls', 'native'):
+            with self.subTest(stage=stage), patch('sys.argv', common + ['--inspect-game-frames', '--stage', stage]), \
+                    patch.object(lab, 'verify_input') as verify, patch.object(lab, 'run_lab', return_value=0) as run, \
+                    patch('sys.stdout', new_callable=io.StringIO):
+                if stage == 'game':
+                    self.assertEqual(lab.main(), 0)
+                    self.assertTrue(run.call_args.args[0].inspect_game_frames)
+                else:
+                    self.assertEqual(lab.main(), 2)
+                    verify.assert_not_called()
+                    run.assert_not_called()
 
 
 if __name__ == '__main__':

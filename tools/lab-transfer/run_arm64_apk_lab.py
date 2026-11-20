@@ -260,7 +260,7 @@ def game_diagnostics(log, instrumentation):
     }
 
 
-def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system_server=None):
+def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system_server=None, frame_scope=None):
     """One real installed-runtime fixture; selected-tag output stays private."""
     classname, flag, tag, seconds, scope = {
         'd3d': ('HandheldD3dProbeTest', 'handheldD3dProbe', 'HandheldD3dProbe', 600,
@@ -282,6 +282,10 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system
         result.update({'verdict_scope': 'automated_game_capture_only', 'automated_game_capture_passed': False,
                        'visual_login_review_required': True, 'visible_login_confirmed': False,
                        'dummy_input_test_completed': False, 'account_input_sent': False})
+    frame_seconds = 45 if frame_scope is not None else 0
+    if frame_scope is not None:
+        result['verdict_scope'] = 'automated_game_capture_and_content_measurements'
+        result['game_frame_content'] = {'analysis_complete': False}
     prefix = docker + ['exec']
     for key, value in bootenv.items():
         prefix += ['--env', key + '=' + value]
@@ -319,7 +323,7 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system
             result['snapshot_control_server_matches'] = matches
             if not matches:
                 raise ValueError('Android restarted after task snapshot control')
-        remaining = deadline - time.monotonic() - 45
+        remaining = deadline - time.monotonic() - 45 - frame_seconds
         if remaining <= 0:
             raise TimeoutError()
         phase = 'instrumentation'
@@ -334,7 +338,7 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system
                        'output_limit_reached': output_limit})
         phase = 'selected_tag_capture'
         before = time.monotonic()
-        remaining = deadline - before - 25
+        remaining = deadline - before - 25 - frame_seconds
         if remaining <= 0:
             raise TimeoutError()
         log, log_exit, log_timeout, log_limit = bounded_capture(
@@ -356,11 +360,28 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system
             result['automated_game_capture_passed'] = result['passed']
         if not result['passed']:
             result['failure_phase'] = 'result_verification'
+        elif frame_scope is not None:
+            phase = 'game_frame_content'
+            result['passed'] = False
+            receipts = re.findall(
+                r'^HANDHELD_GAME_FRAME_CAPTURE_COMPLETE_REQUIRES_VISUAL_REVIEW '
+                r'(handheld-game-captures-[0-9]{1,16}\.json)$', log, re.M)
+            if len(receipts) != 1:
+                raise ValueError('One current game capture receipt is required')
+            before = time.monotonic()
+            frame_content = sibling('verify_game_frame_content').verify_game_frame_content(
+                receipt_basename=receipts[0], deadline=deadline - 25, **frame_scope)
+            result['timings_seconds']['game_frame_content'] = round(time.monotonic() - before, 3)
+            result['game_frame_content'] = frame_content
+            result['passed'] = frame_content['analysis_complete'] is True
+            if not result['passed']:
+                result['failure_phase'] = phase
     except Exception as failure:
         result['failure_phase'] = phase
         result['error_class'] = type(failure).__name__ if type(failure).__name__ in (
             'ValueError', 'TimeoutError', 'TimeoutExpired', 'OSError', 'RuntimeError') else 'OtherError'
-    if result['milestones']['instrumentation_started'] and not result['passed'] and deadline - time.monotonic() >= 30:
+    if (result['milestones']['instrumentation_started'] and not result['passed'] and
+            result.get('failure_phase') != 'game_frame_content' and deadline - time.monotonic() >= 30):
         result['platform_processes_after_fixture'] = platform_process_snapshot(docker, cid, command)
         try:
             result['system_log_after_failed_fixture'] = sibling('android_boot_diagnostics').collect_boot_log(
@@ -576,7 +597,7 @@ def disable_lab_task_snapshots(docker, cid, command, bootenv, dex, progress, lab
 
 
 def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline, install_progress=None,
-                              expected_system_server=None):
+                              expected_system_server=None, frame_scope=None):
     """Actual fixed input installs and platform loader proof before a selected stage."""
     progress = install_progress if install_progress is not None else {}
     progress.update({'phase': 'namespace', 'packages': {}, 'hal_files_verified': 0})
@@ -649,7 +670,7 @@ def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline
         progress['packages'][package]['installed_base_digest_verified'] = True
     progress['phase'] = 'complete'
     result = (component_tests(docker, cid, command, bootenv, deadline) if args.stage == 'native' else
-              runtime_test(args.stage, docker, cid, command, bootenv, deadline, expected_system_server))
+              runtime_test(args.stage, docker, cid, command, bootenv, deadline, expected_system_server, frame_scope))
     result['installed_apk_sha256'] = installed
     result['public_namespace_sha256'] = expected_namespace
     result['nine_public_hal_files_hash_checked_and_mapped'] = bool(hal)
@@ -667,6 +688,8 @@ def main():
                         help='Optional pinned lab-only TaskSnapshot API helper, D3D/game only')
     parser.add_argument('--stock-graphics', action='store_true',
                         help='D3D/game comparator using one unchanged stock graphics boot')
+    parser.add_argument('--inspect-game-frames', action='store_true',
+                        help='Report fixed login-label and background measurements from current game captures')
     parser.add_argument('--stage', choices=('native', 'd3d', 'tls', 'game', 'all'), default='native')
     args = parser.parse_args()
     if args.stage not in ('native', 'd3d', 'tls', 'game'):
@@ -674,6 +697,9 @@ def main():
         return 2
     if args.stock_graphics and (args.stage not in ('d3d', 'game') or args.snapshot_control_dex is not None):
         print(json.dumps({'passed': False, 'scope': 'Stock comparator is D3D/game only and excludes snapshot control; no lab started'}))
+        return 2
+    if args.inspect_game_frames and args.stage != 'game':
+        print(json.dumps({'passed': False, 'scope': 'Frame inspection requires the game stage; no lab started'}))
         return 2
     if args.snapshot_control_dex is not None:
         if args.stage not in ('d3d', 'game'):
@@ -698,10 +724,14 @@ def run_lab(args):
     base_name = 'wow-arm64-boot-' + owner[:16]
     name = base_name
     work = Path(tempfile.mkdtemp(prefix='wow-arm64-boot-', dir='/tmp')).resolve()
-    (work / '.owned-arm64-boot').write_text(owner)
+    owner_marker = work / '.owned-arm64-boot'
+    owner_marker.write_text(owner)
     data = work / 'data'
     data.mkdir(mode=0o700)
     data_identity = (data.stat().st_dev, data.stat().st_ino)
+    frame_scope = None
+    if lab_args.inspect_game_frames:
+        frame_scope = {'data_root': data, 'data_identity': data_identity, 'owner_marker': owner_marker, 'owner': owner}
     cidfile = work / 'container.cid'
     binderfs = work / 'binderfs'
     binderfs.mkdir(mode=0o700)
@@ -1193,7 +1223,7 @@ def run_lab(args):
         report['phase'] = 'native_components' if lab_args.stage == 'native' else 'installed_runtime_test'
         report['install_progress'] = {}
         selected = installed_component_stage(docker, cid, command, bootenv, hal, lab_args, deadline,
-                                             report['install_progress'], expected_system_server)
+                                             report['install_progress'], expected_system_server, frame_scope)
         if lab_args.stage == 'native':
             report['native_components'] = selected
             report['native_component9_pass'] = selected['passed']
@@ -1201,7 +1231,7 @@ def run_lab(args):
             report['installed_runtime_test'] = selected
             report['installed_runtime_test_pass'] = selected['passed']
             if lab_args.stage == 'game':
-                report.update({'verdict_scope': 'automated_game_capture_only',
+                report.update({'verdict_scope': selected['verdict_scope'],
                                'visual_login_review_required': True, 'visible_login_confirmed': False,
                                'dummy_input_test_completed': False, 'credential_use_approved': False})
         if not selected['passed']:

@@ -23,6 +23,10 @@ name: Native ARM64 APK lab
         description: Compare D3D11 or WoW on stock Android graphics
         type: boolean
         default: false
+      inspect_game_frames:
+        description: Check login text and background pixels inside the game lab
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -99,6 +103,12 @@ jobs:
         run: |
           python3 -I tools/lab-transfer/download_lab_inputs.py \
             --output "$RUNNER_TEMP/wow-native-lab-inputs"
+      - name: Install local frame inspection tools
+        if: matrix.stage == 'game' && inputs.inspect_game_frames
+        timeout-minutes: 5
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y -qq --no-install-recommends python3-pil tesseract-ocr tesseract-ocr-eng
       - name: Run the selected checks on the exact APK
         # The preceding download step has already revoked the repository job token.
         shell: bash
@@ -106,6 +116,7 @@ jobs:
           LAB_STAGE: ${{ matrix.stage }}
           LAB_DISABLE_TASK_SNAPSHOTS: ${{ inputs.disable_task_snapshots }}
           LAB_STOCK_GRAPHICS: ${{ inputs.stock_graphics }}
+          LAB_INSPECT_GAME_FRAMES: ${{ inputs.inspect_game_frames }}
         run: |
           set -euo pipefail
           inputs_dir="$RUNNER_TEMP/wow-native-lab-inputs"
@@ -117,6 +128,9 @@ jobs:
           fi
           if [[ "$LAB_STOCK_GRAPHICS" == true && ( "$LAB_STAGE" == d3d || "$LAB_STAGE" == game ) ]]; then
             lab_options+=(--stock-graphics)
+          fi
+          if [[ "$LAB_INSPECT_GAME_FRAMES" == true && "$LAB_STAGE" == game ]]; then
+            lab_options+=(--inspect-game-frames)
           fi
           sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             /usr/bin/python3 -I "$GITHUB_WORKSPACE/tools/lab-transfer/run_arm64_apk_lab.py" \
