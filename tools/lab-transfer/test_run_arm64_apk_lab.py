@@ -577,7 +577,8 @@ class SnapshotControlBoundaryTests(unittest.TestCase):
 
 
 class RenderEngineVulkanTests(unittest.TestCase):
-    VULKAN_DUMP = ' ------------RE Vulkan----------\n Vulkan device initialized: 1\n'
+    VULKAN_DEVICE_FIELDS = ' Vulkan device initialized: 1\n\n Vulkan protected device initialized: 0\n'
+    VULKAN_DUMP = ' ------------RE Vulkan----------\n' + VULKAN_DEVICE_FIELDS
     SURFACEFLINGER = {'status': 'observed', 'pid': 41, 'start_ticks': 320}
 
     def check_backend(self, dump, progress, after=None, backend='gles', exit_code=0):
@@ -598,10 +599,18 @@ class RenderEngineVulkanTests(unittest.TestCase):
         self.assertTrue(progress['verified'])
         self.assertNotIn(private_canary, json.dumps(progress))
 
+    def test_live_vulkan_backend_does_not_depend_on_title_decoration(self):
+        progress = {}
+        self.assertEqual(self.check_backend(self.VULKAN_DEVICE_FIELDS, progress), self.SURFACEFLINGER)
+        self.assertTrue(progress['verified'])
+        self.assertEqual(progress['vk_header_count'], 0)
+
     def test_gl_fallback_uninitialized_vulkan_and_mixed_dumps_are_rejected(self):
         gl_dump = ' ------------RE GLES------------\n GLES: Vulkan via ANGLE\n'
         for dump in (gl_dump, self.VULKAN_DUMP.replace('initialized: 1', 'initialized: 0'),
                      self.VULKAN_DUMP + gl_dump, self.VULKAN_DUMP * 2,
+                     'Vulkan device initialized: 1\n',
+                     self.VULKAN_DUMP.replace('Vulkan protected device', 'Other\n Vulkan protected device'),
                      self.VULKAN_DUMP + "*** SERVICE 'SurfaceFlinger' DUMP TIMEOUT (10000ms) EXPIRED ***"):
             with self.subTest(dump=dump), self.assertRaises(ValueError):
                 self.check_backend(dump, {})

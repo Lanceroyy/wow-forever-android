@@ -623,15 +623,26 @@ def verify_renderengine_vulkan(docker, cid, command, deadline, progress):
                                  "SERVICE 'SurfaceFlinger' DUMP TIMEOUT" not in dump)
     if not progress['dump_complete']:
         raise ValueError('SurfaceFlinger backend dump unavailable')
-    lines = [line.strip() for line in dump.splitlines()]
-    progress['vk_renderer_reported'] = lines.count('------------RE Vulkan----------') == 1
-    progress['gles_renderer_reported'] = '------------RE GLES------------' in lines
-    progress['vk_device_initialized'] = [line for line in lines if line.startswith('Vulkan device initialized:')] == [
-        'Vulkan device initialized: 1']
+    lines = [line.strip() for line in dump.splitlines() if line.strip()]
+    progress['vk_header_count'] = sum(bool(re.fullmatch(r'-{4,32}\s*RE\s+Vulkan\s*-{4,32}', line))
+                                      for line in lines)
+    progress['gles_renderer_reported'] = any(
+        re.fullmatch(r'-{4,32}\s*RE\s+GLES\s*-{4,32}', line) or line.startswith('GLES:') for line in lines)
+    devices = [index for index, line in enumerate(lines) if line.startswith('Vulkan device initialized:')]
+    protected = [index for index, line in enumerate(lines) if line.startswith('Vulkan protected device initialized:')]
+    progress['vk_device_status_rows'] = len(devices)
+    progress['vk_protected_status_rows'] = len(protected)
+    # These adjacent fields come from the actual Vulkan RenderEngine's dump.
+    # Android builds can format the decorative heading differently.
+    progress['vk_device_initialized'] = (len(devices) == len(protected) == 1 and
+                                          protected[0] == devices[0] + 1 and
+                                          lines[devices[0]] == 'Vulkan device initialized: 1' and
+                                          lines[protected[0]] in ('Vulkan protected device initialized: 0',
+                                                                  'Vulkan protected device initialized: 1'))
     after = platform_process_snapshot(docker, cid, command)['surfaceflinger']
     progress['same_surfaceflinger'] = before == after
-    progress['verified'] = (progress['vk_renderer_reported'] and progress['vk_device_initialized'] and
-                            not progress['gles_renderer_reported'] and progress['same_surfaceflinger'])
+    progress['verified'] = (progress['vk_device_initialized'] and not progress['gles_renderer_reported'] and
+                            progress['same_surfaceflinger'])
     if not progress['verified']:
         raise ValueError('SurfaceFlinger did not establish the requested Vulkan backend')
     return after
