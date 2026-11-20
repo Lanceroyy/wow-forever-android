@@ -1,4 +1,5 @@
 """Pure boundary regressions: no Docker, Android, network or cloud execution."""
+from contextlib import nullcontext
 import importlib.util
 import io
 import json
@@ -157,7 +158,9 @@ def runtime_command(log_reset_exit=0, stop_exit=0):
 
 class InstalledRuntimeStageTests(unittest.TestCase):
     def run_stage(self, stage, captures, expected_system_server=None, frame_scope=None, **command_options):
-        with patch.object(lab, 'bounded_capture', side_effect=[*captures, ('', 0, False, False)]) as capture:
+        with patch.object(lab, 'bounded_capture', side_effect=[*captures, ('', 0, False, False)]) as capture, \
+                patch.object(lab, 'selected_game_log', side_effect=lambda *args:
+                             nullcontext(lambda: capture(['selected game stream'], 15))):
             result = lab.runtime_test(stage, ['docker'], 'cid', runtime_command(**command_options),
                                       {'ANDROID_ROOT': '/system'}, 10**12, expected_system_server, frame_scope)
         return result, capture
@@ -274,6 +277,7 @@ class InstalledRuntimeStageTests(unittest.TestCase):
             self.assertNotIn(forbidden, args)
         self.assertEqual(capture.call_args_list[0].args[1], 2100)
         self.assertEqual(result['verification']['game_frames_captured'], 3)
+        self.assertEqual(result['selected_log_capture_mode'], 'live_tagged_interval')
 
     def test_frame_inspection_uses_only_the_current_verified_receipt(self):
         scope = {'data_root': Path('private-data'), 'data_identity': (9, 17),
@@ -371,6 +375,52 @@ class InstalledRuntimeStageTests(unittest.TestCase):
         self.assertTrue(result['startup_gate_samples_truncated'])
         self.assertEqual(result['last_startup_gate']['game_processes'], 39)
         self.assertEqual(result['fixed_wine_exit_codes']['wine_exit_before_capture'], [-2147483648])
+
+
+class LiveGameLogTests(unittest.TestCase):
+    def test_current_begin_and_end_bound_only_the_live_game_log_interval(self):
+        markers = []
+        stream = Mock()
+        stream.poll.return_value = None
+        output = SimpleNamespace(fileno=lambda: 4)
+
+        def send_marker(args, seconds):
+            self.assertEqual(args[:-1], ['docker', 'exec', 'cid', '/system/bin/log', '-p', 'i', '-t', 'GameTag'])
+            markers.append(args[-1])
+            return completed()
+
+        def read(fd, size, offset):
+            self.assertEqual((fd, size, offset), (4, lab.CAPTURE_LIMIT + 1, 0))
+            lines = ['other earlier events', markers[0]]
+            if len(markers) == 2:
+                lines += [runtime_log('game'), markers[1], 'other later events']
+            return ('\n'.join(lines) + '\n').encode()
+
+        with patch.object(lab, 'capture_process', return_value=nullcontext((stream, output))) as capture, \
+                patch.object(lab.os, 'pread', create=True, side_effect=read):
+            with lab.selected_game_log(['docker'], 'cid', send_marker, 'GameTag', 10**12) as finish:
+                self.assertTrue(markers[0].endswith('_BEGIN'))
+                self.assertEqual(finish(), (runtime_log('game'), 0, False, False))
+                self.assertEqual(markers[1], markers[0].removesuffix('_BEGIN') + '_END')
+        self.assertEqual(capture.call_args.args[0][-3:], ['-s', 'GameTag:I', '*:S'])
+        self.assertNotIn('-d', capture.call_args.args[0])
+
+    def test_duplicate_begin_or_dead_stream_blocks_instrumentation(self):
+        output = SimpleNamespace(fileno=lambda: 4)
+        marker_out = []
+
+        def send_marker(args, seconds):
+            marker_out[:] = [args[-1]]
+            return completed()
+
+        for poll in (None, 1):
+            with self.subTest(poll=poll), \
+                    patch.object(lab, 'capture_process', return_value=nullcontext((Mock(poll=lambda: poll), output))), \
+                    patch.object(lab.os, 'pread', create=True, side_effect=lambda *args: (
+                        '\n'.join(marker_out * 2) + '\n').encode()), \
+                    self.assertRaises(ValueError):
+                with lab.selected_game_log(['docker'], 'cid', send_marker, 'GameTag', 10**12):
+                    self.fail('The unverified log stream must not start the instrumented fixture')
 
 
 class StockProfileBoundaryTests(unittest.TestCase):

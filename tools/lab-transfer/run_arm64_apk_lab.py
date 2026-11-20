@@ -7,6 +7,7 @@ Wine certificate, or baseline game-capture stage. Actual login and input still
 require separate review; no stage enters account text or publishes app files.
 """
 import argparse
+from contextlib import contextmanager, nullcontext
 import hashlib
 import importlib.util
 import json
@@ -32,6 +33,7 @@ RUNNER = PACKAGE + '.test/androidx.test.runner.AndroidJUnitRunner'
 BOOT_KEYS = ('BOOTCLASSPATH', 'DEX2OATBOOTCLASSPATH', 'SYSTEMSERVERCLASSPATH',
              'ANDROID_ROOT', 'ANDROID_RUNTIME_ROOT', 'ANDROID_DATA', 'ANDROID_ART_ROOT',
              'ANDROID_I18N_ROOT', 'ANDROID_TZDATA_ROOT')
+CAPTURE_LIMIT = 2 * 1024 * 1024
 
 
 def sibling(name):
@@ -53,15 +55,30 @@ def verify_input(path, size, expected):
         raise ValueError('Pinned input checksum differs')
 
 
-def bounded_capture(argv, timeout):
-    """Private unlinked output with a kernel-enforced 2MiB bound; never export raw."""
+@contextmanager
+def capture_process(argv):
+    """Own one process and its unlinked, size-limited output."""
     import resource
-    limit = 2 * 1024 * 1024
     def bound_output():
-        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (CAPTURE_LIMIT, CAPTURE_LIMIT))
     with tempfile.TemporaryFile() as output:
         process = subprocess.Popen(argv, stdout=output, stderr=subprocess.STDOUT,
                                    preexec_fn=bound_output, start_new_session=True)
+        try:
+            yield process, output
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
+def bounded_capture(argv, timeout):
+    """Read an isolated command result with output and execution bounds."""
+    with capture_process(argv) as (process, output):
         timed_out = False
         try:
             process.wait(timeout=timeout)
@@ -70,8 +87,48 @@ def bounded_capture(argv, timeout):
             process.kill()
             process.wait(timeout=10)
         output.seek(0)
-        raw = output.read(limit + 1)
-    return raw.decode('utf-8', errors='replace'), process.returncode, timed_out, len(raw) >= limit
+        raw = output.read(CAPTURE_LIMIT + 1)
+    return raw.decode('utf-8', errors='replace'), process.returncode, timed_out, len(raw) >= CAPTURE_LIMIT
+
+
+@contextmanager
+def selected_game_log(docker, cid, command, tag, deadline):
+    """Capture the current test tag before Android can rotate its main log."""
+    prefix = docker + ['exec', cid]
+    marker = 'HANDHELD_ARM64_LAB_' + uuid.uuid4().hex
+    start_marker, end_marker = marker + '_BEGIN', marker + '_END'
+    args = prefix + ['/system/bin/logcat', '-b', 'main', '-v', 'raw', '-s', tag + ':I', '*:S']
+    with capture_process(args) as (process, output):
+        def mark_and_read(value):
+            until = min(deadline - 20, time.monotonic() + 8)
+            if until <= time.monotonic():
+                raise TimeoutError()
+            sent = command(prefix + ['/system/bin/log', '-p', 'i', '-t', tag, value], 5)
+            if sent.returncode:
+                raise ValueError('Could not mark the selected game log')
+            while time.monotonic() < until:
+                raw = os.pread(output.fileno(), CAPTURE_LIMIT + 1, 0)
+                if process.poll() is not None or len(raw) >= CAPTURE_LIMIT:
+                    raise ValueError('Selected game log stream ended or exceeded its bound')
+                lines = raw.decode('utf-8', errors='replace').splitlines()
+                indices = [index for index, line in enumerate(lines) if line.strip() == value]
+                if len(indices) > 1:
+                    raise ValueError('Selected game log marker was duplicated')
+                if indices:
+                    return lines, indices[0]
+                time.sleep(0.1)
+            raise TimeoutError()
+
+        mark_and_read(start_marker)
+
+        def finish():
+            lines, end = mark_and_read(end_marker)
+            starts = [index for index, line in enumerate(lines[:end]) if line.strip() == start_marker]
+            if len(starts) != 1:
+                raise ValueError('Selected game log has no unique start before completion')
+            return '\n'.join(lines[starts[0] + 1:end]), 0, False, False
+
+        yield finish
 
 
 def boot_environment(docker, cid, command):
@@ -325,27 +382,34 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system
             result['snapshot_control_server_matches'] = matches
             if not matches:
                 raise ValueError('Android restarted after task snapshot control')
-        remaining = deadline - time.monotonic() - 45 - frame_seconds
-        if remaining <= 0:
-            raise TimeoutError()
-        phase = 'instrumentation'
-        before = time.monotonic()
-        result['milestones']['instrumentation_started'] = True
-        output, exit_code, timed_out, output_limit = bounded_capture(
-            prefix + ['/system/bin/am', 'instrument', '-w', '-r', '-e', 'class',
-                      'app.gamenative.security.' + classname, '-e', flag, 'true', RUNNER],
-            min(seconds, remaining))
-        result['timings_seconds']['instrumentation'] = round(time.monotonic() - before, 3)
-        result.update({'instrumentation_exit_code': exit_code, 'transport_timed_out': timed_out,
-                       'output_limit_reached': output_limit})
-        phase = 'selected_tag_capture'
-        before = time.monotonic()
-        remaining = deadline - before - 25 - frame_seconds
-        if remaining <= 0:
-            raise TimeoutError()
-        log, log_exit, log_timeout, log_limit = bounded_capture(
-            docker + ['exec', cid, '/system/bin/logcat', '-b', 'main', '-d', '-v', 'raw',
-                      '-s', tag + ':I', '*:S'], min(15, remaining))
+        phase = 'selected_tag_stream_start'
+        stream = selected_game_log(docker, cid, command, tag, deadline) if stage == 'game' else nullcontext()
+        with stream as finish_game_log:
+            remaining = deadline - time.monotonic() - 45 - frame_seconds
+            if remaining <= 0:
+                raise TimeoutError()
+            phase = 'instrumentation'
+            before = time.monotonic()
+            result['milestones']['instrumentation_started'] = True
+            output, exit_code, timed_out, output_limit = bounded_capture(
+                prefix + ['/system/bin/am', 'instrument', '-w', '-r', '-e', 'class',
+                          'app.gamenative.security.' + classname, '-e', flag, 'true', RUNNER],
+                min(seconds, remaining))
+            result['timings_seconds']['instrumentation'] = round(time.monotonic() - before, 3)
+            result.update({'instrumentation_exit_code': exit_code, 'transport_timed_out': timed_out,
+                           'output_limit_reached': output_limit})
+            phase = 'selected_tag_capture'
+            before = time.monotonic()
+            remaining = deadline - before - 25 - frame_seconds
+            if remaining <= 0:
+                raise TimeoutError()
+            if finish_game_log is not None:
+                log, log_exit, log_timeout, log_limit = finish_game_log()
+                result['selected_log_capture_mode'] = 'live_tagged_interval'
+            else:
+                log, log_exit, log_timeout, log_limit = bounded_capture(
+                    docker + ['exec', cid, '/system/bin/logcat', '-b', 'main', '-d', '-v', 'raw',
+                              '-s', tag + ':I', '*:S'], min(15, remaining))
         result['timings_seconds']['selected_tag_capture'] = round(time.monotonic() - before, 3)
         log_complete = log_exit == 0 and not log_timeout and not log_limit
         result['milestones']['selected_tag_captured'] = log_complete
