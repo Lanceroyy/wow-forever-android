@@ -34,11 +34,12 @@ def summarize_boot_log(text):
     return counts
 
 
-def collect_boot_log(docker, cid, capture):
+def collect_boot_log(docker, cid, capture, *, after_fixture=False):
     output, code, timed_out, capped = capture(
         docker + ["exec", cid, "/system/bin/logcat", "-b", "main", "-b", "system", "-b", "crash",
                   "-t", str(LOG_TAIL_LIMIT), "-v", "brief", "-s", *LOG_TAGS], 12)
-    return {"scope": "Selected system log categories before APK installation",
+    return {"scope": ("Selected system log categories after a failed app fixture" if after_fixture
+                       else "Selected system log categories before APK installation"),
             "max_tail_log_entries": LOG_TAIL_LIMIT,
             "read_complete": code == 0 and not timed_out and not capped,
             "exit_code": code, "timed_out": timed_out, "output_limit_reached": capped,

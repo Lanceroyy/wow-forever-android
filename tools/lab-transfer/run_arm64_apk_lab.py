@@ -311,6 +311,7 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline):
             raise ValueError('Fresh selected-log boundary unavailable')
         result['milestones']['main_log_reset'] = True
         result['timings_seconds']['log_reset'] = round(time.monotonic() - before, 3)
+        result['platform_processes_before_fixture'] = platform_process_snapshot(docker, cid, command)
         remaining = deadline - time.monotonic() - 45
         if remaining <= 0:
             raise TimeoutError()
@@ -352,6 +353,13 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline):
         result['failure_phase'] = phase
         result['error_class'] = type(failure).__name__ if type(failure).__name__ in (
             'ValueError', 'TimeoutError', 'TimeoutExpired', 'OSError', 'RuntimeError') else 'OtherError'
+    if result['milestones']['instrumentation_started'] and not result['passed'] and deadline - time.monotonic() >= 30:
+        result['platform_processes_after_fixture'] = platform_process_snapshot(docker, cid, command)
+        try:
+            result['system_log_after_failed_fixture'] = sibling('android_boot_diagnostics').collect_boot_log(
+                docker, cid, bounded_capture, after_fixture=True)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            result['system_log_after_failed_fixture'] = {'read_complete': False}
     result['timings_seconds']['total'] = round(time.monotonic() - started, 3)
     return result
 

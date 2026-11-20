@@ -157,7 +157,7 @@ def runtime_command(log_reset_exit=0, stop_exit=0):
 
 class InstalledRuntimeStageTests(unittest.TestCase):
     def run_stage(self, stage, captures, **command_options):
-        with patch.object(lab, 'bounded_capture', side_effect=captures) as capture:
+        with patch.object(lab, 'bounded_capture', side_effect=[*captures, ('', 0, False, False)]) as capture:
             result = lab.runtime_test(stage, ['docker'], 'cid', runtime_command(**command_options),
                                       {'ANDROID_ROOT': '/system'}, 10**12)
         return result, capture
@@ -185,6 +185,7 @@ class InstalledRuntimeStageTests(unittest.TestCase):
                                                   ('', 0, False, False)])
                 self.assertFalse(result['passed'])
                 self.assertTrue(result['verification']['junit_passed'])
+                self.assertTrue(result['system_log_after_failed_fixture']['read_complete'])
 
     def test_numeric_runtime_evidence_without_junit_rejected(self):
         for stage in ('d3d', 'tls'):

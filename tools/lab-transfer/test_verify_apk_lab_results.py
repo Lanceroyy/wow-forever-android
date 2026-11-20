@@ -58,6 +58,18 @@ class EvidenceBoundaryTest(unittest.TestCase):
         output = junit("tls").rsplit("INSTRUMENTATION_STATUS_CODE: 0", 1)[0]
         self.assertFalse(subject.summarize("tls", output, tls())["passed"])
 
+    def test_framework_crash_is_reported_without_arbitrary_message(self):
+        output = ("INSTRUMENTATION_RESULT: shortMsg=Process crashed.\n"
+                  "INSTRUMENTATION_RESULT: longMsg=private details\n"
+                  "INSTRUMENTATION_STATUS_CODE: -1\nINSTRUMENTATION_CODE: 0\n")
+        result = subject.summarize("d3d", output, "")
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["framework_process_crash_reported"])
+        self.assertEqual(result["test_start_status_count"], 0)
+        self.assertEqual(result["final_result_codes"], [0])
+        self.assertEqual(result["non_success_status_codes"], [-1])
+        self.assertNotIn("private details", str(result))
+
     def test_outer_timeout_rejects_otherwise_complete_output(self):
         self.assertFalse(subject.summarize("tls", junit("tls"), tls(), 124)["passed"])
 

@@ -111,6 +111,13 @@ def instrumentation_result(text, kind):
         "unexpected_status_or_protocol_errors": errors,
         "final_completion_present": final_codes == [-1],
         "skipped_or_failed_statuses": sum(code not in (0, 1) for code in statuses),
+        "test_start_status_count": statuses.count(1),
+        "non_success_status_codes": sorted(set(code for code in statuses if code not in (0, 1)))[:16],
+        "final_result_codes": final_codes[:8],
+        "framework_process_crash_reported": any(re.fullmatch(
+            r"INSTRUMENTATION_(?:RESULT|STATUS): shortMsg=Process crashed\.?", line) for line in lines),
+        "instrumentation_aborted_reported": any(line.startswith(("INSTRUMENTATION_FAILED:",
+                                                                   "INSTRUMENTATION_ABORTED:")) for line in lines),
     }
 
 
