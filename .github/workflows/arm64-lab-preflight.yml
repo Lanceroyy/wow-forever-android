@@ -144,6 +144,7 @@ jobs:
         shell: bash
         run: |
           sudo -n python3 -I - <<'PY'
+          import hashlib
           import json
           import os
           from pathlib import Path
@@ -165,15 +166,20 @@ jobs:
           data = work / 'data'
           data.mkdir(mode=0o700)
           cidfile = work / 'container.cid'
+          binderfs = work / 'binderfs'
+          binderfs.mkdir(mode=0o700)
+          binder_mount_id = None
+          binder_mounted = False
           empty_config = '/proc/self/arm64-preflight-no-client-config'
           assert not Path(empty_config).exists()
           docker = [shutil.which('docker'), '--config', empty_config, '--host', 'unix:///var/run/docker.sock']
           started = time.monotonic()
-          deadline = started + 480
+          deadline = started + 450
           cid = None
           report = {'scope': 'Disposable stock ARM64 Android boot only; no APK, HAL, game, input, or credential test',
                     'boot_only_pass': False, 'apks_uploaded': False, 'hal_overlays': False,
-                    'adb_published': False, 'owned_container_removed': False}
+                    'adb_published': False, 'owned_container_removed': False,
+                    'owned_binderfs_unmounted': False, 'phase': 'kernel_modules'}
 
           def command(args, seconds=20):
               remaining = deadline - time.monotonic()
@@ -206,6 +212,19 @@ jobs:
               assert (work / '.owned-arm64-boot').read_text() == owner
               return value
 
+          def owned_binder_mount():
+              assert work.parent == Path('/tmp') and work.name.startswith('wow-arm64-boot-')
+              assert (work / '.owned-arm64-boot').read_text() == owner
+              assert binderfs.parent == work and not binderfs.is_symlink()
+              rows = []
+              for line in Path('/proc/self/mountinfo').read_text().splitlines():
+                  fields = line.split()
+                  if len(fields) > 6 and fields[4] == str(binderfs):
+                      assert fields[fields.index('-') + 1] == 'binder'
+                      rows.append(int(fields[0]))
+              assert len(rows) <= 1
+              return rows[0] if rows else None
+
           try:
               assert os.geteuid() == 0 and platform.machine() == 'aarch64'
               assert os.sysconf('SC_PAGE_SIZE') == 4096
@@ -215,29 +234,127 @@ jobs:
               assert modprobe is not None and modinfo is not None
               for module in ('binder_linux', 'loop', 'dm_mod'):
                   assert command([modinfo, '-F', 'filename', module]).returncode == 0
-              checked([modprobe, 'binder_linux', 'devices=binder,hwbinder,vndbinder'])
+              checked([modprobe, 'binder_linux'])
               checked([modprobe, 'loop'])
               checked([modprobe, 'dm_mod'])
-              devices = ['/dev/binder', '/dev/hwbinder', '/dev/vndbinder']
-              required_devices = devices + ['/dev/loop-control', '/dev/mapper/control']
+              report['phase'] = 'binder_uapi'
+              build = Path('/lib/modules/' + platform.release() + '/build').resolve()
+              uts = (build / 'include/generated/utsrelease.h').read_text()
+              assert re.findall(r'^#define UTS_RELEASE "([^"]+)"$', uts, re.M) == [platform.release()]
+              header_roots = [build]
+              source_link = Path('/lib/modules/' + platform.release() + '/source')
+              if source_link.is_dir():
+                  header_roots.append(source_link.resolve())
+              for include in re.findall(r'^include\s+(/\S+)/Makefile\s*$', (build / 'Makefile').read_text(), re.M):
+                  included = Path(include).resolve()
+                  assert included.is_relative_to(Path('/usr/src'))
+                  header_roots.append(included)
+              headers = [base / 'include/uapi/linux/android/binderfs.h' for base in header_roots]
+              available = [path for path in headers if path.is_file()]
+              report['matching_kernel_binder_uapi_present'] = bool(available)
+              assert available
+              header = available[0].resolve()
+              uapi = header.parents[2]
+              report['public_binder_uapi_sha256'] = hashlib.sha256(header.read_bytes()).hexdigest()
+              compiler = shutil.which('cc')
+              assert compiler is not None
+              source = work / 'binderfs-create.c'
+              helper = work / 'binderfs-create'
+              source.write_text(r'''
+          #include <errno.h>
+          #include <fcntl.h>
+          #include <stddef.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <sys/ioctl.h>
+          #include <unistd.h>
+          #include <linux/android/binderfs.h>
+          _Static_assert(BINDERFS_MAX_NAME == 255, "binder name ABI");
+          _Static_assert(sizeof(struct binderfs_device) == 264, "binder device ABI");
+          _Static_assert(offsetof(struct binderfs_device, major) == 256, "binder major ABI");
+          _Static_assert(offsetof(struct binderfs_device, minor) == 260, "binder minor ABI");
+          _Static_assert(_IOC_TYPE(BINDER_CTL_ADD) == 'b' && _IOC_NR(BINDER_CTL_ADD) == 1, "binder ioctl ABI");
+          _Static_assert(_IOC_SIZE(BINDER_CTL_ADD) == sizeof(struct binderfs_device), "binder ioctl size");
+          _Static_assert(_IOC_DIR(BINDER_CTL_ADD) == (_IOC_READ | _IOC_WRITE), "binder ioctl direction");
+          int main(int argc, char **argv) {
+              const char *names[] = {"binder", "hwbinder", "vndbinder"};
+              if (argc != 2) return 64;
+              int fd = open(argv[1], O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+              if (fd < 0) return 65;
+              for (unsigned i = 0; i < 3; ++i) {
+                  struct binderfs_device device = {0};
+                  memcpy(device.name, names[i], strlen(names[i]) + 1);
+                  if (ioctl(fd, BINDER_CTL_ADD, &device) < 0) {
+                      printf("ERROR %u %d\n", i, errno);
+                      close(fd);
+                      return 66;
+                  }
+                  printf("NODE %s %u %u\n", names[i], device.major, device.minor);
+              }
+              return close(fd) == 0 ? 0 : 67;
+          }
+          ''')
+              checked([compiler, '-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror', '-O2',
+                       '-I', str(uapi), str(source), '-o', str(helper)], 30)
+              report['matching_uapi_helper_compiled'] = True
+              report['phase'] = 'binder_mount'
+              assert owned_binder_mount() is None
+              checked(['mount', '-t', 'binder', 'binder', str(binderfs)])
+              binder_mounted = True
+              binder_mount_id = owned_binder_mount()
+              assert binder_mount_id is not None
+              control = binderfs / 'binder-control'
+              report['binder_control_character_device'] = stat.S_ISCHR(control.lstat().st_mode)
+              assert report['binder_control_character_device']
+              report['phase'] = 'binder_allocate'
+              allocation = command([str(helper), str(control)], 15)
+              report['binder_helper_exit'] = allocation.returncode
+              for line in allocation.stdout.splitlines():
+                  error = re.fullmatch(r'ERROR ([0-2]) ([0-9]{1,5})', line)
+                  if error:
+                      report['binder_helper_error_device_index'] = int(error[1])
+                      report['binder_helper_errno'] = int(error[2])
+              assert allocation.returncode == 0
+              nodes = {}
+              for line in allocation.stdout.splitlines():
+                  match = re.fullmatch(r'NODE (binder|hwbinder|vndbinder) ([0-9]{1,10}) ([0-9]{1,10})', line)
+                  assert match and match[1] not in nodes
+                  nodes[match[1]] = {'major': int(match[2]), 'minor': int(match[3])}
+              assert set(nodes) == {'binder', 'hwbinder', 'vndbinder'}
+              for node, numbers in nodes.items():
+                  path = binderfs / node
+                  before = path.lstat()
+                  assert stat.S_ISCHR(before.st_mode)
+                  assert os.major(before.st_rdev) == numbers['major'] and os.minor(before.st_rdev) == numbers['minor']
+                  os.chmod(path, 0o666)
+                  after = path.lstat()
+                  assert (after.st_dev, after.st_ino, after.st_rdev) == (before.st_dev, before.st_ino, before.st_rdev)
+                  assert stat.S_ISCHR(after.st_mode) and stat.S_IMODE(after.st_mode) == 0o666
+              report['owned_binder_character_devices'] = {node: True for node in nodes}
+              report['phase'] = 'host_loop_mapper_devices'
+              required_devices = ['/dev/loop-control', '/dev/mapper/control']
               until = min(deadline, time.monotonic() + 10)
               while time.monotonic() < until:
                   if all(Path(path).exists() and stat.S_ISCHR(Path(path).stat().st_mode) for path in required_devices):
                       break
                   time.sleep(0.5)
-              assert all(stat.S_ISCHR(Path(path).stat().st_mode) for path in required_devices)
+              report['host_control_character_devices'] = {
+                  path: Path(path).exists() and stat.S_ISCHR(Path(path).stat().st_mode) for path in required_devices}
+              assert all(report['host_control_character_devices'].values())
               report['distro_binder_loop_device_mapper_ready'] = True
+              report['phase'] = 'image_pull'
               checked(docker + ['pull', '--quiet', '--platform=linux/arm64', image], 180)
               identity = json.loads(checked(docker + ['image', 'inspect', image]))[0]
               assert identity['Id'] == expected_image_id and identity['Architecture'] == 'arm64'
               assert identity['Os'] == 'linux' and image in identity['RepoDigests']
               report['pinned_image_id'] = identity['Id']
+              report['phase'] = 'container_create'
               args = docker + ['create', '--pull=never', '--platform=linux/arm64', '--name', name,
                   '--cidfile', str(cidfile), '--label', 'io.wowforever.boot-owner=' + owner,
                   '--privileged', '--network=none', '--cpus=4', '--memory=8g', '--memory-swap=8g',
                   '--mount', 'type=bind,src=' + str(data) + ',dst=/data']
-              for device in devices:
-                  args += ['--mount', 'type=bind,src=' + device + ',dst=' + device]
+              for node in ('binder', 'hwbinder', 'vndbinder'):
+                  args += ['--mount', 'type=bind,src=' + str(binderfs / node) + ',dst=/dev/' + node]
               args += [image, 'androidboot.use_memfd=1', 'androidboot.redroid_width=540',
                        'androidboot.redroid_height=960', 'androidboot.redroid_dpi=240',
                        'androidboot.redroid_gpu_mode=guest']
@@ -250,8 +367,10 @@ jobs:
               assert meta['HostConfig']['NanoCpus'] == 4000000000
               assert meta['HostConfig']['NetworkMode'] == 'none'
               assert not meta['HostConfig']['PortBindings']
+              report['phase'] = 'container_start'
               checked(docker + ['start', cid], 30)
               report['owned_container_started'] = True
+              report['phase'] = 'boot_wait'
               boot_deadline = min(deadline - 30, time.monotonic() + 300)
               boot = ''
               while time.monotonic() < boot_deadline:
@@ -268,6 +387,7 @@ jobs:
                       pass
                   time.sleep(3)
               report['boot_completed'] = boot == '1'
+              report['phase'] = 'readiness'
               properties = {}
               for key in ('ro.build.version.sdk', 'ro.product.cpu.abi', 'ro.dalvik.vm.native.bridge'):
                   query = command(docker + ['exec', cid, '/system/bin/getprop', key], 10)
@@ -293,6 +413,7 @@ jobs:
                   'ro.build.version.sdk': '35', 'ro.product.cpu.abi': 'arm64-v8a',
                   'ro.dalvik.vm.native.bridge': '0'} and all(services.values()) and
                   report['wms_responsive'] and report['display_enabled'] and report['system_booted'])
+              report['phase'] = 'complete'
           except Exception as failure:
               report['incomplete'] = True
               report['error_class'] = type(failure).__name__ if type(failure).__name__ in (
@@ -311,8 +432,15 @@ jobs:
                       report['owned_container_removed'] = removed.returncode == 0
               except Exception:
                   report['owned_cleanup_incomplete'] = True
+              try:
+                  if binder_mounted and (cid is None or report['owned_container_removed']):
+                      assert binder_mount_id is not None and owned_binder_mount() == binder_mount_id
+                      unmounted = subprocess.run(['umount', str(binderfs)], capture_output=True, timeout=20)
+                      report['owned_binderfs_unmounted'] = unmounted.returncode == 0 and owned_binder_mount() is None
+              except Exception:
+                  report['owned_binderfs_cleanup_incomplete'] = True
               report['elapsed_seconds'] = round(time.monotonic() - started, 3)
               report['ephemeral_stock_data_retained_on_disposable_runner'] = True
               print(json.dumps(report, sort_keys=True))
-          raise SystemExit(0 if report['boot_only_pass'] and report['owned_container_removed'] else 1)
+          raise SystemExit(0 if report['boot_only_pass'] and report['owned_container_removed'] and report['owned_binderfs_unmounted'] else 1)
           PY
