@@ -576,6 +576,43 @@ class SnapshotControlBoundaryTests(unittest.TestCase):
             self.assertIsNone(run.call_args.args[0].snapshot_control_dex)
 
 
+class RenderEngineVulkanTests(unittest.TestCase):
+    VULKAN_DUMP = ' ------------RE Vulkan----------\n Vulkan device initialized: 1\n'
+    SURFACEFLINGER = {'status': 'observed', 'pid': 41, 'start_ticks': 320}
+
+    def check_backend(self, dump, progress, after=None, backend='gles', exit_code=0):
+        def command(args, timeout):
+            return completed(output={'debug.renderengine.vulkan': 'true',
+                                     'debug.renderengine.backend': backend,
+                                     'debug.renderengine.graphite': ''}[args[-1]])
+
+        identities = [{'surfaceflinger': self.SURFACEFLINGER}, {'surfaceflinger': after or self.SURFACEFLINGER}]
+        with patch.object(lab, 'platform_process_snapshot', side_effect=identities), \
+                patch.object(lab, 'bounded_capture', return_value=(dump, exit_code, False, False)):
+            return lab.verify_renderengine_vulkan(['docker'], 'cid', command, 10**12, progress)
+
+    def test_flag_and_live_vulkan_dump_are_required_without_exporting_dump(self):
+        progress = {}
+        private_canary = 'private-layer-canary@example.invalid'
+        self.assertEqual(self.check_backend(self.VULKAN_DUMP + private_canary, progress), self.SURFACEFLINGER)
+        self.assertTrue(progress['verified'])
+        self.assertNotIn(private_canary, json.dumps(progress))
+
+    def test_gl_fallback_uninitialized_vulkan_and_mixed_dumps_are_rejected(self):
+        gl_dump = ' ------------RE GLES------------\n GLES: Vulkan via ANGLE\n'
+        for dump in (gl_dump, self.VULKAN_DUMP.replace('initialized: 1', 'initialized: 0'),
+                     self.VULKAN_DUMP + gl_dump, self.VULKAN_DUMP * 2,
+                     self.VULKAN_DUMP + "*** SERVICE 'SurfaceFlinger' DUMP TIMEOUT (10000ms) EXPIRED ***"):
+            with self.subTest(dump=dump), self.assertRaises(ValueError):
+                self.check_backend(dump, {})
+
+    def test_restart_dump_failure_or_explicit_backend_override_is_rejected(self):
+        for failure in ({'after': dict(self.SURFACEFLINGER, start_ticks=321)},
+                        {'backend': 'skiavkthreaded'}, {'exit_code': 1}):
+            with self.subTest(failure=failure), self.assertRaises(ValueError):
+                self.check_backend(self.VULKAN_DUMP, {}, **failure)
+
+
 class StockComparatorOptionTests(unittest.TestCase):
     def test_stock_comparator_keeps_exact_selected_graphics_stage(self):
         for stage in ('d3d', 'game'):
@@ -607,6 +644,23 @@ class StockComparatorOptionTests(unittest.TestCase):
                 if stage == 'game':
                     self.assertEqual(lab.main(), 0)
                     self.assertTrue(run.call_args.args[0].inspect_game_frames)
+                else:
+                    self.assertEqual(lab.main(), 2)
+                    verify.assert_not_called()
+                    run.assert_not_called()
+
+    def test_renderengine_comparison_uses_only_warm_graphics(self):
+        common = ['lab', '--main', 'main', '--qa', 'qa', '--hal', 'hal', '--renderengine-vulkan']
+        for options, allowed in ((['--stage', 'game'], True), (['--stage', 'd3d'], True),
+                                 (['--stage', 'game', '--stock-graphics'], False),
+                                 (['--stage', 'd3d', '--snapshot-control-dex', 'test.dex'], False),
+                                 (['--stage', 'native'], False)):
+            with self.subTest(options=options), patch('sys.argv', common + options), \
+                    patch.object(lab, 'verify_input') as verify, patch.object(lab, 'run_lab', return_value=0) as run, \
+                    patch('sys.stdout', new_callable=io.StringIO):
+                if allowed:
+                    self.assertEqual(lab.main(), 0)
+                    self.assertTrue(run.call_args.args[0].renderengine_vulkan)
                 else:
                     self.assertEqual(lab.main(), 2)
                     verify.assert_not_called()

@@ -25,6 +25,8 @@ MAIN_SHA = '1b8e7a3be0dc490b727ec22a7d548dd1c65423ca57e7e6abe18695b10202f62e'
 QA_SHA = '859b6cc24945988fb8a55d32fc5152fee8b52dddc91d52f987b261f1a6003ac0'
 HAL_SHA = 'dc9352ca778f7fce4510fd51f1dcadd9eed6573fb3bb4fd9fd3506fdafbb943a'
 SNAPSHOT_DEX_SHA = 'ec3f9f0a2e0ea508c88167235f5347c8c5177836c4261497db9eadeeab22df6e'
+STOCK_BUILD_PROPERTIES_SHA = '38a385a1ae931aabc0e4950a506c1f3eeeb84f141ad0a2620b2223183845082e'
+WARM_BUILD_PROPERTIES_SHA = 'f76133a2f65993637c86b1694bbc646aa5fc337238bda6083ac28750d535d4f2'
 PACKAGE = 'app.wowforever.handheld'
 RUNNER = PACKAGE + '.test/androidx.test.runner.AndroidJUnitRunner'
 BOOT_KEYS = ('BOOTCLASSPATH', 'DEX2OATBOOTCLASSPATH', 'SYSTEMSERVERCLASSPATH',
@@ -392,7 +394,7 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system
     return result
 
 
-def prepare_cache_overlay(docker, image, expected_image_id, work, owner, command):
+def prepare_cache_overlay(docker, image, expected_image_id, work, owner, command, renderengine_vulkan=False):
     """Read one pinned public file from an owned container that is never started."""
     name = 'wow-arm64-properties-' + owner[:16]
     cidfile = work / 'properties.cid'
@@ -430,18 +432,20 @@ def prepare_cache_overlay(docker, image, expected_image_id, work, owner, command
         checked(docker + ['cp', cid + ':/system/build.prop', str(original)], 20)
         assert original.is_file() and not original.is_symlink()
         base = original.read_bytes()
-        assert len(base) == 5231 and hashlib.sha256(base).hexdigest() == (
-            '38a385a1ae931aabc0e4950a506c1f3eeeb84f141ad0a2620b2223183845082e')
+        assert len(base) == 5231 and hashlib.sha256(base).hexdigest() == STOCK_BUILD_PROPERTIES_SHA
         assert base.endswith(b'\n') and b'service.sf.prime_shader_cache' not in base
         raw = base + b'service.sf.prime_shader_cache=false\n'
-        expected = 'f76133a2f65993637c86b1694bbc646aa5fc337238bda6083ac28750d535d4f2'
-        assert len(raw) == 5267 and hashlib.sha256(raw).hexdigest() == expected
+        assert len(raw) == 5267 and hashlib.sha256(raw).hexdigest() == WARM_BUILD_PROPERTIES_SHA
+        if renderengine_vulkan:
+            assert not re.search(rb'^[ \t]*debug\.renderengine\.(vulkan|backend|graphite)[ \t]*=', base, re.M)
+            raw += b'debug.renderengine.vulkan=true\n'
         path = work / 'cache-system-build.prop'
         with path.open('xb') as target:
             target.write(raw)
         path.chmod(0o444)
         assert path.read_bytes() == raw and path.stat().st_mode & 0o222 == 0
-        return {'source': str(path), 'destination': '/system/build.prop', 'sha256': expected}
+        return {'source': str(path), 'destination': '/system/build.prop',
+                'sha256': hashlib.sha256(raw).hexdigest(), 'renderengine_vulkan': renderengine_vulkan}
     finally:
         if cid is None and cidfile.is_file():
             candidate = cidfile.read_text().strip()
@@ -596,8 +600,45 @@ def disable_lab_task_snapshots(docker, cid, command, bootenv, dex, progress, lab
         progress['elapsed_seconds'] = round(time.monotonic() - started, 3)
 
 
+def verify_renderengine_vulkan(docker, cid, command, deadline, progress):
+    """Verify the actual boot-time SurfaceFlinger backend without returning its dump."""
+    before = platform_process_snapshot(docker, cid, command)['surfaceflinger']
+    if before['status'] != 'observed':
+        raise ValueError('SurfaceFlinger identity is unavailable')
+    prefix = docker + ['exec', cid]
+    # Redroid sets the legacy "gles" value. Android 15 ignores that unrecognized
+    # explicit choice and still runs the Vulkan flag and capability checks.
+    for key, allowed in (('vulkan', ('true',)), ('backend', ('', 'gles')), ('graphite', ('', 'false', '0'))):
+        value = command(prefix + ['/system/bin/getprop', 'debug.renderengine.' + key], 8)
+        progress[key + '_property_verified'] = value.returncode == 0 and value.stdout.strip() in allowed
+    if not all(progress[key] for key in ('vulkan_property_verified', 'backend_property_verified',
+                                        'graphite_property_verified')):
+        raise ValueError('The expected RenderEngine properties are unavailable')
+    remaining = deadline - time.monotonic() - 30
+    if remaining <= 0:
+        raise TimeoutError()
+    dump, code, timed_out, limited = bounded_capture(
+        prefix + ['/system/bin/dumpsys', '-t', '10', 'SurfaceFlinger'], min(15, remaining))
+    progress['dump_complete'] = (code == 0 and not timed_out and not limited and
+                                 "SERVICE 'SurfaceFlinger' DUMP TIMEOUT" not in dump)
+    if not progress['dump_complete']:
+        raise ValueError('SurfaceFlinger backend dump unavailable')
+    lines = [line.strip() for line in dump.splitlines()]
+    progress['vk_renderer_reported'] = lines.count('------------RE Vulkan----------') == 1
+    progress['gles_renderer_reported'] = '------------RE GLES------------' in lines
+    progress['vk_device_initialized'] = [line for line in lines if line.startswith('Vulkan device initialized:')] == [
+        'Vulkan device initialized: 1']
+    after = platform_process_snapshot(docker, cid, command)['surfaceflinger']
+    progress['same_surfaceflinger'] = before == after
+    progress['verified'] = (progress['vk_renderer_reported'] and progress['vk_device_initialized'] and
+                            not progress['gles_renderer_reported'] and progress['same_surfaceflinger'])
+    if not progress['verified']:
+        raise ValueError('SurfaceFlinger did not establish the requested Vulkan backend')
+    return after
+
+
 def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline, install_progress=None,
-                              expected_system_server=None, frame_scope=None):
+                              expected_system_server=None, frame_scope=None, property_overlay=None):
     """Actual fixed input installs and platform loader proof before a selected stage."""
     progress = install_progress if install_progress is not None else {}
     progress.update({'phase': 'namespace', 'packages': {}, 'hal_files_verified': 0})
@@ -616,8 +657,8 @@ def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline
         raise ValueError('Selected system Vulkan HAL differs')
     progress['vulkan_selection_verified'] = True
     progress['phase'] = 'build_property_digest'
-    expected_properties = ('f76133a2f65993637c86b1694bbc646aa5fc337238bda6083ac28750d535d4f2' if hal else
-                           '38a385a1ae931aabc0e4950a506c1f3eeeb84f141ad0a2620b2223183845082e')
+    expected_properties = property_overlay['sha256'] if property_overlay else (
+        WARM_BUILD_PROPERTIES_SHA if hal else STOCK_BUILD_PROPERTIES_SHA)
     if checked_android(['/system/bin/sha256sum', '/system/build.prop']).split()[0] != expected_properties:
         raise ValueError('Public selected-profile boot properties differ')
     progress['build_property_digest_verified'] = True
@@ -668,6 +709,12 @@ def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline
             raise ValueError('Installed base APK bytes differ')
         installed[package] = expected
         progress['packages'][package]['installed_base_digest_verified'] = True
+    expected_surfaceflinger = None
+    if property_overlay and property_overlay['renderengine_vulkan']:
+        progress['phase'] = 'renderengine_vulkan'
+        progress['renderengine_vulkan'] = {}
+        expected_surfaceflinger = verify_renderengine_vulkan(docker, cid, command, deadline,
+                                                              progress['renderengine_vulkan'])
     progress['phase'] = 'complete'
     result = (component_tests(docker, cid, command, bootenv, deadline) if args.stage == 'native' else
               runtime_test(args.stage, docker, cid, command, bootenv, deadline, expected_system_server, frame_scope))
@@ -675,6 +722,14 @@ def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline
     result['public_namespace_sha256'] = expected_namespace
     result['nine_public_hal_files_hash_checked_and_mapped'] = bool(hal)
     result['graphics_profile'] = 'stock_warm_lavapipe' if hal else 'stock'
+    if expected_surfaceflinger is not None:
+        result['graphics_profile'] = 'stock_warm_lavapipe_renderengine_vulkan'
+        actual = platform_process_snapshot(docker, cid, command)['surfaceflinger']
+        observed_before = result.get('platform_processes_before_fixture', {}).get('surfaceflinger')
+        result['surfaceflinger_backend_continuity_verified'] = observed_before == expected_surfaceflinger == actual
+        if result['passed'] and not result['surfaceflinger_backend_continuity_verified']:
+            result['passed'] = False
+            result['failure_phase'] = 'renderengine_process_changed'
     result['native_bridge_override_or_env_mirroring_used'] = False
     return result
 
@@ -690,6 +745,8 @@ def main():
                         help='D3D/game comparator using one unchanged stock graphics boot')
     parser.add_argument('--inspect-game-frames', action='store_true',
                         help='Report fixed login-label and background measurements from current game captures')
+    parser.add_argument('--renderengine-vulkan', action='store_true',
+                        help='Verify SurfaceFlinger selects Vulkan in the warm Lavapipe comparison')
     parser.add_argument('--stage', choices=('native', 'd3d', 'tls', 'game', 'all'), default='native')
     args = parser.parse_args()
     if args.stage not in ('native', 'd3d', 'tls', 'game'):
@@ -700,6 +757,10 @@ def main():
         return 2
     if args.inspect_game_frames and args.stage != 'game':
         print(json.dumps({'passed': False, 'scope': 'Frame inspection requires the game stage; no lab started'}))
+        return 2
+    if args.renderengine_vulkan and (args.stage not in ('d3d', 'game') or args.stock_graphics or
+                                    args.snapshot_control_dex is not None):
+        print(json.dumps({'passed': False, 'scope': 'RenderEngine comparison requires the warm D3D or game stage; no lab started'}))
         return 2
     if args.snapshot_control_dex is not None:
         if args.stage not in ('d3d', 'game'):
@@ -748,7 +809,7 @@ def run_lab(args):
                         ('Baseline production game capture; visual login and unsent input are not verified'
                          if lab_args.stage == 'game' else
                          'Selected actual installed Wine ' + lab_args.stage + ' stage; not a game/login/credential verdict')),
-              'selected_stage': lab_args.stage,
+              'selected_stage': lab_args.stage, 'renderengine_vulkan_requested': lab_args.renderengine_vulkan,
               'boot_only_pass': False, 'passed': False, 'hal_overlays': False, 'boot_profiles': [], 'account_input_sent': False,
               'adb_published': False, 'owned_container_removed': False,
               'owned_binderfs_unmounted': False, 'phase': 'kernel_modules'}
@@ -1195,16 +1256,20 @@ def run_lab(args):
         assert identity['Id'] == expected_image_id and identity['Architecture'] == 'arm64'
         assert identity['Os'] == 'linux' and image in identity['RepoDigests']
         report['pinned_image_id'] = identity['Id']
+        property_overlay = None
         if lab_args.stage in ('native', 'tls') or lab_args.stock_graphics:
             selected_profile = boot_profile('stock', 'bridge', [], 90)
         else:
             stock = boot_profile('stock', 'none', [], 90)
             stop_empty_stock(stock)
             report['phase'] = 'public_cache_overlay'
-            cache_overlay = prepare_cache_overlay(docker, image, expected_image_id, work, owner, command)
-            report['one_optional_cache_property_overlay_sha256'] = cache_overlay['sha256']
-            overlays = hal['readonly_bind_targets'] + [cache_overlay]
-            selected_profile = boot_profile('stock_warm_lavapipe', 'bridge', overlays, 180)
+            property_overlay = prepare_cache_overlay(docker, image, expected_image_id, work, owner, command,
+                                                     lab_args.renderengine_vulkan)
+            report['one_optional_cache_property_overlay_sha256'] = property_overlay['sha256']
+            overlays = hal['readonly_bind_targets'] + [property_overlay]
+            profile = ('stock_warm_lavapipe_renderengine_vulkan' if lab_args.renderengine_vulkan else
+                       'stock_warm_lavapipe')
+            selected_profile = boot_profile(profile, 'bridge', overlays, 180)
         report['graphics_profile'] = selected_profile['graphics_profile']
         report['boot_only_pass'] = selected_profile['boot_only_pass']
         report['phase'] = 'native_components' if lab_args.stage == 'native' else 'installed_runtime_test'
@@ -1223,7 +1288,8 @@ def run_lab(args):
         report['phase'] = 'native_components' if lab_args.stage == 'native' else 'installed_runtime_test'
         report['install_progress'] = {}
         selected = installed_component_stage(docker, cid, command, bootenv, hal, lab_args, deadline,
-                                             report['install_progress'], expected_system_server, frame_scope)
+                                             report['install_progress'], expected_system_server, frame_scope,
+                                             property_overlay)
         if lab_args.stage == 'native':
             report['native_components'] = selected
             report['native_component9_pass'] = selected['passed']

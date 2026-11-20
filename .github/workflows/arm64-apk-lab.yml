@@ -27,6 +27,10 @@ name: Native ARM64 APK lab
         description: Check login text and background pixels inside the game lab
         type: boolean
         default: false
+      renderengine_vulkan:
+        description: Verify the Vulkan compositor on the warm Lavapipe graphics profile
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -117,6 +121,7 @@ jobs:
           LAB_DISABLE_TASK_SNAPSHOTS: ${{ inputs.disable_task_snapshots }}
           LAB_STOCK_GRAPHICS: ${{ inputs.stock_graphics }}
           LAB_INSPECT_GAME_FRAMES: ${{ inputs.inspect_game_frames }}
+          LAB_RENDERENGINE_VULKAN: ${{ inputs.renderengine_vulkan }}
         run: |
           set -euo pipefail
           inputs_dir="$RUNNER_TEMP/wow-native-lab-inputs"
@@ -131,6 +136,9 @@ jobs:
           fi
           if [[ "$LAB_INSPECT_GAME_FRAMES" == true && "$LAB_STAGE" == game ]]; then
             lab_options+=(--inspect-game-frames)
+          fi
+          if [[ "$LAB_RENDERENGINE_VULKAN" == true && ( "$LAB_STAGE" == d3d || "$LAB_STAGE" == game ) ]]; then
+            lab_options+=(--renderengine-vulkan)
           fi
           sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             /usr/bin/python3 -I "$GITHUB_WORKSPACE/tools/lab-transfer/run_arm64_apk_lab.py" \
