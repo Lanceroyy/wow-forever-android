@@ -423,7 +423,7 @@ jobs:
               report['public_services_found'] = services
               readiness_deadline = min(deadline - 30, time.monotonic() + 90)
               report['readiness_samples'] = []
-              report['wms_responsive'] = report['display_enabled'] = report['system_booted'] = False
+              report['wms_responsive'] = report['display_enabled'] = report['system_booted'] = report['display_ready'] = False
 
               def readiness_query(args, seconds=10):
                   remaining = readiness_deadline - time.monotonic()
@@ -437,20 +437,44 @@ jobs:
 
               while time.monotonic() < readiness_deadline:
                   before_wms = time.monotonic()
-                  query = readiness_query(['/system/bin/timeout', '10', '/system/bin/dumpsys', 'window'], 15)
+                  query = readiness_query(['/system/bin/timeout', '10', '/system/bin/dumpsys', 'window', '-a'], 15)
                   report['wms_query_seconds'] = round(time.monotonic() - before_wms, 3)
                   report['wms_query_exit'] = query.returncode
                   report['wms_responsive'] = query.returncode == 0 and 'WINDOW MANAGER' in query.stdout
                   report['display_enabled'] = 'mDisplayEnabled=true' in query.stdout
                   report['system_booted'] = 'mSystemBooted=true' in query.stdout
+                  private_display = public_boolean(query.stdout, 'mDisplayEnabled')
+                  display_exit = state = valid = default_on = None
+                  rows = []
+                  if private_display == 'unavailable':
+                      display = readiness_query(['/system/bin/cmd', 'display', 'get-displays'])
+                      display_exit = display.returncode
+                      rows = [line for line in display.stdout.splitlines() if re.match(r'^\s*Display id 0: ', line)]
+                      state, valid = 'unavailable', False
+                      if display_exit == 0 and len(rows) == 1:
+                          value = re.search(r', state (UNKNOWN|OFF|ON|DOZE|DOZE_SUSPEND|VR|ON_SUSPEND)(?=[, }])', rows[0])
+                          validity = re.search(r', isValid=(true|false)\s*$', rows[0])
+                          state = value[1] if value else 'unclassified'
+                          valid = validity is not None and validity[1] == 'true'
+                      default_on = display_exit == 0 and len(rows) == 1 and valid and state == 'ON'
+                  report['default_display_on'] = default_on
+                  report['private_display_enabled_observation'] = private_display
+                  report['display_ready'] = private_display == 'true' or (
+                      private_display == 'unavailable' and report['default_display_on'])
+                  report['display_readiness_source'] = ('verbose_wms' if private_display == 'true' else
+                      ('public_default_display_on' if report['display_ready'] else 'unavailable_or_not_ready'))
                   sample = {'elapsed_seconds': round(time.monotonic() - started, 3),
                             'wms_exit': query.returncode, 'wms_responsive': report['wms_responsive'],
-                            'wms_seconds': report['wms_query_seconds'], 'fixed_wms_flags': {
+                            'wms_seconds': report['wms_query_seconds'], 'display_query_exit': display_exit,
+                            'default_display_id': 0 if len(rows) == 1 else None,
+                            'default_display_state': state, 'default_display_valid': valid,
+                            'default_display_row_count': len(rows) if display_exit is not None else None,
+                            'fixed_wms_flags': {
                                 key: public_boolean(query.stdout, key) for key in (
                                     'mDisplayEnabled', 'mSystemBooted', 'mBootAnimationStopped',
                                     'mDisplayFrozen', 'mDisplayReady')}}
                   report['readiness_samples'].append(sample)
-                  if report['wms_responsive'] and report['display_enabled'] and report['system_booted']:
+                  if report['wms_responsive'] and report['display_ready'] and report['system_booted']:
                       sample['optional_diagnostics_skipped_after_readiness'] = True
                       break
                   for key, allowed in (
@@ -473,7 +497,7 @@ jobs:
               report['boot_only_pass'] = (meta['State']['Running'] and not meta['State']['OOMKilled'] and boot == '1' and properties == {
                   'ro.build.version.sdk': '35', 'ro.product.cpu.abi': 'arm64-v8a',
                   'ro.dalvik.vm.native.bridge': '0'} and all(services.values()) and
-                  report['wms_responsive'] and report['display_enabled'] and report['system_booted'])
+                  report['wms_responsive'] and report['display_ready'] and report['system_booted'])
               report['phase'] = 'complete'
           except Exception as failure:
               report['incomplete'] = True
