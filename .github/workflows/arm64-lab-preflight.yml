@@ -1,0 +1,142 @@
+name: ARM64 Android lab preflight
+
+"on":
+  workflow_dispatch:
+  push:
+    branches: [security/hardening-v1]
+    paths: [.github/workflows/arm64-lab-preflight.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  kernel-and-docker-metadata:
+    if: github.repository == 'Lanceroyy/wow-forever-android' && github.ref == 'refs/heads/security/hardening-v1'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 4
+    steps:
+      - name: Read kernel and Docker prerequisites without changing the runner
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import gzip
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import re
+          import shutil
+          import stat
+          import subprocess
+
+          def read_text(path, limit=2097152):
+              try:
+                  with Path(path).open('rb') as stream:
+                      data = stream.read(limit + 1)
+                  return data.decode('utf-8', errors='replace') if len(data) <= limit else None
+              except OSError:
+                  return None
+
+          def character_device(path):
+              try:
+                  value = Path(path).stat()
+                  return {'present': True, 'character_device': stat.S_ISCHR(value.st_mode)}
+              except OSError:
+                  return {'present': False, 'character_device': False}
+
+          release = platform.release()
+          report = {
+              'scope': 'Read-only ARM64 Android lab prerequisites; no Android, GPU, or app execution',
+              'machine': platform.machine(),
+              'kernel_release': release,
+              'page_size': os.sysconf('SC_PAGE_SIZE'),
+              'devices': {name: character_device('/dev/' + name) for name in (
+                  'binder', 'hwbinder', 'vndbinder', 'ashmem', 'kvm', 'ion', 'dma_heap/system')},
+              'binderfs_directory_present': Path('/dev/binderfs').is_dir(),
+              'matching_kernel_build_tree_present': Path('/lib/modules/' + release + '/build/Makefile').is_file(),
+              'privileged_container_tested': False,
+              'modules_loaded_by_probe': False,
+          }
+          filesystems = read_text('/proc/filesystems') or ''
+          report['binderfs_registered'] = any(line.split()[-1:] == ['binder'] for line in filesystems.splitlines())
+          modules = read_text('/proc/modules') or ''
+          loaded = {line.split()[0] for line in modules.splitlines() if line.split()}
+          report['loaded_android_modules'] = {name: name in loaded for name in ('binder_linux', 'ashmem_linux')}
+          disabled = read_text('/proc/sys/kernel/modules_disabled', 64)
+          report['kernel_modules_disabled'] = int(disabled.strip()) if disabled and disabled.strip() in ('0', '1') else None
+          status = read_text('/proc/self/status', 16384) or ''
+          caps = {}
+          for line in status.splitlines():
+              key, _, value = line.partition(':')
+              if key in ('CapEff', 'CapPrm', 'CapBnd') and re.fullmatch(r'[0-9a-fA-F]{1,16}', value.strip()):
+                  caps[key] = value.strip()
+          report['probe_process_capability_masks'] = caps
+
+          config = None
+          source = None
+          for label, path in (
+              ('boot_config', '/boot/config-' + release),
+              ('matching_headers_config', '/lib/modules/' + release + '/build/.config'),
+          ):
+              config = read_text(path)
+              if config is not None:
+                  source = label
+                  break
+          if config is None:
+              try:
+                  with gzip.open('/proc/config.gz', 'rb') as stream:
+                      data = stream.read(2097153)
+                  if len(data) <= 2097152:
+                      config = data.decode('utf-8', errors='replace')
+                      source = 'proc_config_gz'
+              except (OSError, EOFError):
+                  pass
+          keys = ('CONFIG_ANDROID_BINDER_IPC', 'CONFIG_ANDROID_BINDERFS', 'CONFIG_ASHMEM',
+                  'CONFIG_MEMFD_CREATE', 'CONFIG_DMABUF_HEAPS', 'CONFIG_DMABUF_HEAPS_SYSTEM',
+                  'CONFIG_ION', 'CONFIG_IPV6', 'CONFIG_MODULES', 'CONFIG_MODULE_SIG_FORCE')
+          states = {key: 'unavailable' if config is None else 'unspecified' for key in keys}
+          for line in (config or '').splitlines():
+              for key in keys:
+                  if line == '# ' + key + ' is not set':
+                      states[key] = 'n'
+                  elif line.startswith(key + '=') and line[len(key) + 1:] in ('y', 'm', 'n'):
+                      states[key] = line[len(key) + 1:]
+          report['kernel_config_source'] = source
+          report['kernel_config'] = states
+
+          modinfo = shutil.which('modinfo')
+          module_metadata = {}
+          for name in ('binder_linux', 'ashmem_linux'):
+              value = {'modinfo_available': modinfo is not None}
+              if modinfo:
+                  try:
+                      result = subprocess.run([modinfo, '-F', 'filename', name], capture_output=True, text=True, timeout=10)
+                      value.update({'exit': result.returncode, 'module_metadata_present': result.returncode == 0,
+                                    'builtin': result.returncode == 0 and result.stdout.strip() == '(builtin)'})
+                  except (OSError, subprocess.TimeoutExpired):
+                      value['incomplete'] = True
+              module_metadata[name] = value
+          report['android_module_metadata'] = module_metadata
+
+          docker = shutil.which('docker')
+          report['docker_client_present'] = docker is not None
+          if docker:
+              # Read only the local daemon. Avoid any user's Docker contexts or credentials.
+              empty_config = '/proc/self/arm64-preflight-no-client-config'
+              assert not Path(empty_config).exists()
+              template = ('{"architecture":{{json .Architecture}},"kernel_version":{{json .KernelVersion}},'
+                          '"storage_driver":{{json .Driver}},"cgroup_version":{{json .CgroupVersion}},'
+                          '"security_options":{{json .SecurityOptions}}}')
+              try:
+                  result = subprocess.run([docker, '--config', empty_config, '--host', 'unix:///var/run/docker.sock',
+                                           'info', '--format', template], capture_output=True, text=True, timeout=15)
+                  report['docker_info_exit'] = result.returncode
+                  if result.returncode == 0 and len(result.stdout) <= 8192:
+                      info = json.loads(result.stdout)
+                      if isinstance(info, dict) and set(info) == {
+                          'architecture', 'kernel_version', 'storage_driver', 'cgroup_version', 'security_options'}:
+                          report['docker_metadata'] = info
+              except (OSError, ValueError, subprocess.TimeoutExpired):
+                  report['docker_metadata_incomplete'] = True
+          print(json.dumps(report, sort_keys=True))
+          PY
