@@ -3,7 +3,8 @@
 
 Consumes three already downloaded local pinned inputs. It never downloads private
 artifacts or receives an owner token. Select one isolated native9, D3D11 device,
-or Wine certificate stage. Game and actual login/input stages are unavailable.
+Wine certificate, or baseline game-capture stage. Actual login and input still
+require separate review; no stage enters account text or publishes app files.
 """
 import argparse
 import hashlib
@@ -195,6 +196,69 @@ def runtime_diagnostics(stage, text):
             'session_status_observed': any(line.startswith('Session: ') for line in lines)}
 
 
+def game_diagnostics(log, instrumentation):
+    """Fixed preparation/gate/frame observations; no names, paths, images or text."""
+    lines = log.splitlines()
+    gates = []
+    frames = []
+    gate_count = frame_count = 0
+    last_gate = None
+    strict_gate_observed = False
+    for line in lines:
+        gate = re.fullmatch(r'Startup gate: game_windows=([0-9]{1,10}) '
+                            r'game_processes=([0-9]{1,10}) mapped_classes=.*', line)
+        if gate:
+            gate_count += 1
+            last_gate = {'game_windows': int(gate[1]), 'game_processes': int(gate[2])}
+            if len(gates) < 32:
+                gates.append(last_gate)
+        frame = re.fullmatch(r'Captured actual game render: handheld-game-[0-9]{1,16}-([012])\.png '
+                             r'([1-9][0-9]{0,4})x([1-9][0-9]{0,4})', line)
+        if frame:
+            frame_count += 1
+            if len(frames) < 8:
+                frames.append({'index': int(frame[1]), 'width': int(frame[2]), 'height': int(frame[3])})
+        if re.fullmatch(r'Actual game window/process observed; waiting [0-9]{1,3}s before capture', line):
+            strict_gate_observed = True
+    source = log + '\n' + instrumentation
+    exits = {}
+    for label, pattern in (
+        ('wine_exit_before_frame', r'Wine exited before a game frame: (-?[0-9]{1,10})(?![0-9])'),
+        ('wine_exit_before_capture', r'Wine exited before capture: (-?[0-9]{1,10})(?![0-9])'),
+    ):
+        values = [int(value) for value in re.findall(pattern, source)]
+        exits[label] = [value for value in values if -(2**31) <= value < 2**31][:8]
+    preparation = {
+        'official_build_check': 'Preparation: Checking the latest World of Warcraft build',
+        'official_client_verification': 'Preparation: Verifying World of Warcraft client files',
+        'official_archive_index_check': 'Preparation: Checking archive indexes (',
+        'private_prefix_configuration': 'Preparation: Configuring ',
+        'private_prefix_creation': 'Preparation: Creating prefix environment (first boot)',
+        'rootfs_download': 'Preparation: Downloading first-run runtime',
+        'rootfs_install': 'Preparation: Installing first-run runtime',
+        'wine_and_graphics_preparation': 'Session: Preparing Wine and graphics',
+        'application_window_callback': 'Session: Game window opened',
+    }
+    return {
+        'preparation_phases_observed': {
+            phase: any(line.startswith(prefix) for line in lines) for phase, prefix in preparation.items()},
+        'baseline_production_wrapper_selected': True,
+        'direct_game_diagnostic_selected': False,
+        'startup_gate_samples': gates, 'startup_gate_sample_count': gate_count,
+        'startup_gate_samples_truncated': gate_count > len(gates), 'last_startup_gate': last_gate,
+        'strict_game_window_and_process_observed': strict_gate_observed,
+        'frame_observations': frames, 'frame_observation_count': frame_count,
+        'frame_observations_truncated': frame_count > len(frames),
+        'fixed_wine_exit_codes': exits,
+        'fixed_errors_observed': {
+            'no_current_game_window_and_process': 'No current mapped WoW window and native game process' in source,
+            'game_window_or_process_disappeared': 'The game window/process disappeared' in source,
+            'frame_or_fixture_future_timeout': 'java.util.concurrent.TimeoutException' in source,
+            'instrumentation_process_crashed': 'Process crashed' in source,
+        },
+    }
+
+
 def runtime_test(stage, docker, cid, command, bootenv, deadline):
     """One real installed-runtime fixture; selected-tag output stays private."""
     classname, flag, tag, seconds, scope = {
@@ -204,12 +268,19 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline):
         'tls': ('HandheldWineTlsTest', 'handheldWineTls', 'HandheldWineTlsTest', 900,
                 'Actual installed Wine certificate matrix and seven mapped-library identities; '
                 'no game, login, or account input'),
+        'game': ('HandheldGameFrameTest', 'handheldGameFrame', 'HandheldGameFrameTest', 2100,
+                 'Baseline production game launch and actual render-path capture only; '
+                 'visible login and unsent input require separate review'),
     }[stage]
     started = time.monotonic()
     result = {'stage': stage, 'scope': scope, 'passed': False, 'timings_seconds': {},
               'milestones': {'fresh_process': False, 'main_log_reset': False,
                              'instrumentation_started': False, 'selected_tag_captured': False},
               'credential_use_approved': False}
+    if stage == 'game':
+        result.update({'verdict_scope': 'automated_game_capture_only', 'automated_game_capture_passed': False,
+                       'visual_login_review_required': True, 'visible_login_confirmed': False,
+                       'dummy_input_test_completed': False, 'account_input_sent': False})
     prefix = docker + ['exec']
     for key, value in bootenv.items():
         prefix += ['--env', key + '=' + value]
@@ -270,8 +341,11 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline):
         # This specialized verifier is mandatory; JUnit completion alone is insufficient.
         verified = sibling('verify_apk_lab_results').summarize(stage, output, log, exit_code=exit_code)
         result['verification'] = verified
-        result['diagnostics'] = runtime_diagnostics(stage, log)
+        result['diagnostics'] = (game_diagnostics(log, output) if stage == 'game' else
+                                 runtime_diagnostics(stage, log))
         result['passed'] = verified['passed'] and not timed_out and not output_limit and log_complete
+        if stage == 'game':
+            result['automated_game_capture_passed'] = result['passed']
         if not result['passed']:
             result['failure_phase'] = 'result_verification'
     except Exception as failure:
@@ -344,8 +418,58 @@ def prepare_cache_overlay(docker, image, expected_image_id, work, owner, command
                 raise RuntimeError('Owned public property capture container cleanup failed')
 
 
-def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline):
+def platform_process_snapshot(docker, cid, command):
+    """Best-effort public process identities only; never a readiness oracle."""
+    result = {}
+    for name in ('surfaceflinger', 'system_server'):
+        try:
+            value = command(docker + ['exec', cid, '/system/bin/pidof', name], 2)
+            pid = value.stdout.strip()
+            if value.returncode == 1 and not pid:
+                result[name] = {'status': 'absent'}
+                continue
+            if value.returncode or not re.fullmatch(r'[1-9][0-9]{0,9}', pid):
+                result[name] = {'status': 'unavailable'}
+                continue
+            value = command(docker + ['exec', cid, '/system/bin/cat', '/proc/' + pid + '/stat'], 2)
+            prefix = pid + ' (' + name + ') '
+            if value.returncode or not value.stdout.startswith(prefix):
+                result[name] = {'status': 'unavailable'}
+                continue
+            fields = value.stdout[len(prefix):].split()
+            if len(fields) <= 19 or not re.fullmatch(r'[0-9]{1,20}', fields[19]):
+                result[name] = {'status': 'unavailable'}
+                continue
+            result[name] = {'status': 'observed', 'pid': int(pid), 'start_ticks': int(fields[19])}
+        except Exception:
+            result[name] = {'status': 'unavailable'}
+    return result
+
+
+def assert_no_data_mounters(docker, data, command):
+    """Do not start a second reader/writer of this fresh, runner-owned data tree."""
+    listed = command(docker + ['ps', '--no-trunc', '-q'], 10)
+    identities = listed.stdout.split()
+    assert listed.returncode == 0 and len(identities) <= 64
+    assert all(re.fullmatch(r'[0-9a-f]{64}', value) for value in identities)
+    if not identities:
+        return
+    inspected = command(docker + ['inspect'] + identities, 15)
+    assert inspected.returncode == 0
+    for metadata in json.loads(inspected.stdout):
+        if not metadata['State']['Running']:
+            continue
+        for mount in metadata['Mounts']:
+            if mount['Type'] != 'bind':
+                continue
+            path = Path(mount['Source']).resolve()
+            assert path != data and path not in data.parents and data not in path.parents
+
+
+def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline, install_progress=None):
     """Actual fixed input installs and platform loader proof before a selected stage."""
+    progress = install_progress if install_progress is not None else {}
+    progress.update({'phase': 'namespace', 'packages': {}, 'hal_files_verified': 0})
     def checked_android(values, seconds=20):
         value = command(docker + ['exec', cid] + values, seconds)
         if value.returncode:
@@ -355,49 +479,71 @@ def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline
     namespace = checked_android(['/system/bin/sha256sum', '/linkerconfig/ld.config.txt'])
     if namespace.split()[0] != expected_namespace:
         raise ValueError('Public Android namespace differs from reviewed closure')
+    progress['namespace_verified'] = True
+    progress['phase'] = 'vulkan_selection'
     if checked_android(['/system/bin/getprop', 'ro.hardware.vulkan']) != 'pastel':
         raise ValueError('Selected system Vulkan HAL differs')
-    if checked_android(['/system/bin/getprop', 'service.sf.prime_shader_cache']) != 'false':
-        raise ValueError('Reviewed optional shader-cache setting differs')
-    if checked_android(['/system/bin/sha256sum', '/system/build.prop']).split()[0] != (
-            'f76133a2f65993637c86b1694bbc646aa5fc337238bda6083ac28750d535d4f2'):
-        raise ValueError('Public one-property boot overlay differs')
-    sf = checked_android(['/system/bin/pidof', 'surfaceflinger'])
-    if not re.fullmatch('[0-9]{1,10}', sf):
-        raise ValueError('One actual SurfaceFlinger is required')
-    maps = checked_android(['/system/bin/cat', '/proc/' + sf + '/maps'])
-    paths = {parts[5] for line in maps.splitlines()
-             if len(parts := line.split(None, 5)) == 6 and 'x' in parts[1]}
-    for entry in hal['readonly_bind_targets']:
-        actual = checked_android(['/system/bin/sha256sum', entry['destination']])
-        if actual.split()[0] != entry['sha256'] or entry['destination'] not in paths:
-            raise ValueError('Actual mapped public HAL bytes differ')
+    progress['vulkan_selection_verified'] = True
+    progress['phase'] = 'build_property_digest'
+    expected_properties = ('f76133a2f65993637c86b1694bbc646aa5fc337238bda6083ac28750d535d4f2' if hal else
+                           '38a385a1ae931aabc0e4950a506c1f3eeeb84f141ad0a2620b2223183845082e')
+    if checked_android(['/system/bin/sha256sum', '/system/build.prop']).split()[0] != expected_properties:
+        raise ValueError('Public selected-profile boot properties differ')
+    progress['build_property_digest_verified'] = True
+    if hal:
+        progress['phase'] = 'cache_property_readback'
+        if checked_android(['/system/bin/getprop', 'service.sf.prime_shader_cache']) != 'false':
+            raise ValueError('Reviewed optional shader-cache setting differs')
+        progress['cache_property_verified'] = True
+        progress['phase'] = 'mapped_hal_digest'
+        sf = checked_android(['/system/bin/pidof', 'surfaceflinger'])
+        if not re.fullmatch('[0-9]{1,10}', sf):
+            raise ValueError('One actual SurfaceFlinger is required')
+        maps = checked_android(['/system/bin/cat', '/proc/' + sf + '/maps'])
+        paths = {parts[5] for line in maps.splitlines()
+                 if len(parts := line.split(None, 5)) == 6 and 'x' in parts[1]}
+        for entry in hal['readonly_bind_targets']:
+            actual = checked_android(['/system/bin/sha256sum', entry['destination']])
+            if actual.split()[0] != entry['sha256'] or entry['destination'] not in paths:
+                raise ValueError('Actual mapped public HAL bytes differ')
+            progress['hal_files_verified'] += 1
     prefix = docker + ['exec']
     for key, value in bootenv.items():
         prefix += ['--env', key + '=' + value]
     prefix += [cid]
     installed = {}
     for package, source, expected in ((PACKAGE, args.main, MAIN_SHA), (PACKAGE + '.test', args.qa, QA_SHA)):
+        progress['package'] = package
+        progress['packages'][package] = {}
+        progress['phase'] = 'apk_copy'
         remote = '/data/local/tmp/' + ('main.apk' if package == PACKAGE else 'qa.apk')
         copied = command(docker + ['cp', str(source.resolve()), cid + ':' + remote], 60)
         if copied.returncode:
             raise ValueError('Owned APK copy failed')
+        progress['packages'][package]['copy_succeeded'] = True
+        progress['phase'] = 'package_manager_install'
         result = command(prefix + ['/system/bin/pm', 'install', '-r', '-t', remote], 120)
         if result.returncode or result.stdout.strip() != 'Success':
             raise ValueError('Package Manager did not confirm exact APK install')
+        progress['packages'][package]['package_manager_success'] = True
+        progress['phase'] = 'installed_base_path'
         query = command(prefix + ['/system/bin/pm', 'path', package], 20)
         lines = query.stdout.strip().splitlines()
         if query.returncode or len(lines) != 1 or not re.fullmatch(r'package:/data/app/[A-Za-z0-9_/=+~.-]+/base\.apk', lines[0]):
             raise ValueError('Installed package base path is not unique')
         base = lines[0][len('package:'):]
+        progress['phase'] = 'installed_base_digest'
         if checked_android(['/system/bin/sha256sum', base]).split()[0] != expected:
             raise ValueError('Installed base APK bytes differ')
         installed[package] = expected
+        progress['packages'][package]['installed_base_digest_verified'] = True
+    progress['phase'] = 'complete'
     result = (component_tests(docker, cid, command, bootenv, deadline) if args.stage == 'native' else
               runtime_test(args.stage, docker, cid, command, bootenv, deadline))
     result['installed_apk_sha256'] = installed
     result['public_namespace_sha256'] = expected_namespace
-    result['nine_public_hal_files_hash_checked_and_mapped'] = True
+    result['nine_public_hal_files_hash_checked_and_mapped'] = bool(hal)
+    result['graphics_profile'] = 'stock_warm_lavapipe' if hal else 'stock'
     result['native_bridge_override_or_env_mirroring_used'] = False
     return result
 
@@ -409,7 +555,7 @@ def main():
     parser.add_argument('--hal', required=True, type=Path)
     parser.add_argument('--stage', choices=('native', 'd3d', 'tls', 'game', 'all'), default='native')
     args = parser.parse_args()
-    if args.stage not in ('native', 'd3d', 'tls'):
+    if args.stage not in ('native', 'd3d', 'tls', 'game'):
         print(json.dumps({'passed': False, 'scope': 'Requested later stage is not implemented; no lab started'}))
         return 2
     verify_input(args.main, 129571767, MAIN_SHA)
@@ -427,11 +573,13 @@ def run_lab(args):
     image = 'redroid/redroid@sha256:b21c57533662275928832602f7c09b83cb198aa9b271135ae49d978857d6795f'
     expected_image_id = 'sha256:c9c5cfdc4671d32340b5305f623e286c29da971b5f22d382e78829c9282a16d0'
     owner = uuid.uuid4().hex
-    name = 'wow-arm64-boot-' + owner[:16]
+    base_name = 'wow-arm64-boot-' + owner[:16]
+    name = base_name
     work = Path(tempfile.mkdtemp(prefix='wow-arm64-boot-', dir='/tmp')).resolve()
     (work / '.owned-arm64-boot').write_text(owner)
     data = work / 'data'
     data.mkdir(mode=0o700)
+    data_identity = (data.stat().st_dev, data.stat().st_ino)
     cidfile = work / 'container.cid'
     binderfs = work / 'binderfs'
     binderfs.mkdir(mode=0o700)
@@ -441,13 +589,15 @@ def run_lab(args):
     assert not Path(empty_config).exists()
     docker = [shutil.which('docker'), '--config', empty_config, '--host', 'unix:///var/run/docker.sock']
     started = time.monotonic()
-    deadline = started + 1500
+    deadline = started + (2700 if lab_args.stage == 'game' else 1500)
     cid = None
     report = {'scope': ('Native ARM64 JNI and protected generated GL only; not a game/login/credential verdict'
                         if lab_args.stage == 'native' else
-                        'Selected actual installed Wine ' + lab_args.stage + ' stage; not a game/login/credential verdict'),
+                        ('Baseline production game capture; visual login and unsent input are not verified'
+                         if lab_args.stage == 'game' else
+                         'Selected actual installed Wine ' + lab_args.stage + ' stage; not a game/login/credential verdict')),
               'selected_stage': lab_args.stage,
-              'boot_only_pass': False, 'passed': False, 'hal_overlays': True, 'account_input_sent': False,
+              'boot_only_pass': False, 'passed': False, 'hal_overlays': False, 'boot_profiles': [], 'account_input_sent': False,
               'adb_published': False, 'owned_container_removed': False,
               'owned_binderfs_unmounted': False, 'phase': 'kernel_modules'}
 
@@ -495,11 +645,234 @@ def run_lab(args):
         assert len(rows) <= 1
         return rows[0] if rows else None
 
+    def create_and_boot(profile_report, network, overlays, readiness_seconds):
+        nonlocal cid, cidfile, name
+        name = base_name + '-' + profile_report['graphics_profile']
+        cidfile = work / (profile_report['graphics_profile'] + '.cid')
+        cid = None
+        report['owned_container_removed'] = False
+        last_identity_sample = [float('-inf')]
+        previous_identities = {}
+        profile_report['platform_process_samples'] = []
+        profile_report['platform_process_identity_changes'] = {'surfaceflinger': 0, 'system_server': 0}
+
+        def observe_processes():
+            snapshot = platform_process_snapshot(docker, cid, command)
+            last_identity_sample[0] = time.monotonic()
+            entry = {'elapsed_seconds': round(last_identity_sample[0] - started, 3), 'identities': snapshot}
+            if len(profile_report['platform_process_samples']) < 32:
+                profile_report['platform_process_samples'].append(entry)
+            profile_report['last_platform_process_sample'] = entry
+            for key in ('surfaceflinger', 'system_server'):
+                before, after = previous_identities.get(key), snapshot[key]
+                if before and before['status'] == after['status'] == 'observed' and before != after:
+                    profile_report['platform_process_identity_changes'][key] += 1
+                previous_identities[key] = after
+
+        profile_report['phase'] = 'container_create'
+        args = docker + ['create', '--pull=never', '--platform=linux/arm64', '--name', name,
+            '--cidfile', str(cidfile), '--label', 'io.wowforever.boot-owner=' + owner,
+            '--privileged', '--network=' + network, '--cpus=4', '--memory=8g', '--memory-swap=8g',
+            '--mount', 'type=bind,src=' + str(data) + ',dst=/data']
+        for node in ('binder', 'hwbinder', 'vndbinder'):
+            args += ['--mount', 'type=bind,src=' + str(binderfs / node) + ',dst=/dev/' + node]
+        for entry in overlays:
+            args += ['--mount', 'type=bind,src=' + entry['source'] + ',dst=' + entry['destination'] + ',readonly']
+        args += [image, 'androidboot.use_memfd=1', 'androidboot.redroid_width=540',
+                 'androidboot.redroid_height=960', 'androidboot.redroid_dpi=240',
+                 'androidboot.redroid_gpu_mode=guest']
+        checked(args, 30)
+        cid = cidfile.read_text().strip()
+        assert re.fullmatch('[0-9a-f]{64}', cid)
+        meta = owned_container(cid)
+        assert meta['HostConfig']['Memory'] == 8589934592
+        assert meta['HostConfig']['MemorySwap'] == 8589934592
+        assert meta['HostConfig']['NanoCpus'] == 4000000000
+        assert meta['HostConfig']['NetworkMode'] == network
+        assert not meta['HostConfig']['PortBindings']
+        mounts = {row['Destination']: row for row in meta['Mounts']}
+        for entry in overlays:
+            row = mounts[entry['destination']]
+            assert row['Type'] == 'bind' and row['RW'] is False and row['Source'] == entry['source']
+        assert set(mounts) == {'/data', '/dev/binder', '/dev/hwbinder', '/dev/vndbinder'} | {entry['destination'] for entry in overlays}
+        report['hal_overlays'] = bool(overlays)
+        profile_report['phase'] = 'container_start'
+        checked(docker + ['start', cid], 30)
+        profile_report['owned_container_started'] = True
+        observe_processes()
+        profile_report['phase'] = 'boot_wait'
+        boot_deadline = min(deadline - 30, time.monotonic() + 300)
+        boot = ''
+        while time.monotonic() < boot_deadline:
+            meta = owned_container(cid)
+            if not meta['State']['Running']:
+                profile_report['container_exit_code'] = meta['State']['ExitCode']
+                break
+            try:
+                query = command(docker + ['exec', cid, '/system/bin/getprop', 'sys.boot_completed'], 10)
+                if query.returncode == 0 and query.stdout.strip() == '1':
+                    boot = '1'
+                    observe_processes()
+                    break
+            except subprocess.TimeoutExpired:
+                pass
+            time.sleep(3)
+        profile_report['boot_completed'] = boot == '1'
+        profile_report['phase'] = 'readiness'
+        properties = {}
+        for key in ('ro.build.version.sdk', 'ro.product.cpu.abi', 'ro.dalvik.vm.native.bridge'):
+            query = command(docker + ['exec', cid, '/system/bin/getprop', key], 10)
+            value = query.stdout.strip() if query.returncode == 0 else ''
+            properties[key] = value if re.fullmatch('[A-Za-z0-9._-]{0,64}', value) else 'unclassified'
+        profile_report['public_properties'] = properties
+        services = {}
+        for service in ('window', 'SurfaceFlinger'):
+            query = command(docker + ['exec', cid, '/system/bin/service', 'check', service], 10)
+            services[service] = query.returncode == 0 and query.stdout.strip() == 'Service ' + service + ': found'
+        profile_report['public_services_found'] = services
+        readiness_deadline = min(deadline - 30, time.monotonic() + readiness_seconds)
+        profile_report['readiness_samples'] = []
+        profile_report['wms_responsive'] = profile_report['display_enabled'] = profile_report['system_booted'] = profile_report['display_ready'] = False
+
+        def readiness_query(args, seconds=10):
+            remaining = readiness_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError()
+            return command(docker + ['exec', cid] + args, min(seconds, remaining))
+
+        def public_boolean(text, key):
+            values = set(re.findall(r'\b' + re.escape(key) + r'=(true|false)\b', text))
+            return next(iter(values)) if len(values) == 1 else ('mixed' if values else 'unavailable')
+
+        while time.monotonic() < readiness_deadline:
+            before_wms = time.monotonic()
+            query = readiness_query(['/system/bin/timeout', '10', '/system/bin/dumpsys', 'window', '-a'], 15)
+            profile_report['wms_query_seconds'] = round(time.monotonic() - before_wms, 3)
+            profile_report['wms_query_exit'] = query.returncode
+            profile_report['wms_responsive'] = query.returncode == 0 and 'WINDOW MANAGER' in query.stdout
+            profile_report['display_enabled'] = 'mDisplayEnabled=true' in query.stdout
+            profile_report['system_booted'] = 'mSystemBooted=true' in query.stdout
+            private_display = public_boolean(query.stdout, 'mDisplayEnabled')
+            secure_override = public_boolean(query.stdout, 'mDisableSecureWindows')
+            profile_report['secure_window_override_observation'] = secure_override
+            profile_report['secure_window_override_disabled'] = (secure_override == 'false'
+                if secure_override in ('true', 'false') else None)
+            display_exit = state = valid = default_on = None
+            rows = []
+            if private_display == 'unavailable':
+                display = readiness_query(['/system/bin/cmd', 'display', 'get-displays'])
+                display_exit = display.returncode
+                rows = [line for line in display.stdout.splitlines() if re.match(r'^\s*Display id 0: ', line)]
+                state, valid = 'unavailable', False
+                if display_exit == 0 and len(rows) == 1:
+                    value = re.search(r', state (UNKNOWN|OFF|ON|DOZE|DOZE_SUSPEND|VR|ON_SUSPEND)(?=[, }])', rows[0])
+                    validity = re.search(r', isValid=(true|false)\s*$', rows[0])
+                    state = value[1] if value else 'unclassified'
+                    valid = validity is not None and validity[1] == 'true'
+                default_on = display_exit == 0 and len(rows) == 1 and valid and state == 'ON'
+            profile_report['default_display_on'] = default_on
+            profile_report['private_display_enabled_observation'] = private_display
+            profile_report['display_ready'] = private_display == 'true' or (
+                private_display == 'unavailable' and profile_report['default_display_on'])
+            profile_report['display_readiness_source'] = ('verbose_wms' if private_display == 'true' else
+                ('public_default_display_on' if profile_report['display_ready'] else 'unavailable_or_not_ready'))
+            sample = {'elapsed_seconds': round(time.monotonic() - started, 3),
+                      'wms_exit': query.returncode, 'wms_responsive': profile_report['wms_responsive'],
+                      'wms_seconds': profile_report['wms_query_seconds'], 'display_query_exit': display_exit,
+                      'default_display_id': 0 if len(rows) == 1 else None,
+                      'default_display_state': state, 'default_display_valid': valid,
+                      'default_display_row_count': len(rows) if display_exit is not None else None,
+                      'fixed_wms_flags': {
+                          key: public_boolean(query.stdout, key) for key in (
+                              'mDisplayEnabled', 'mSystemBooted', 'mBootAnimationStopped',
+                              'mDisplayFrozen', 'mDisplayReady', 'mDisableSecureWindows')}}
+            profile_report['readiness_samples'].append(sample)
+            if (profile_report['wms_responsive'] and profile_report['display_ready'] and profile_report['system_booted']
+                    and secure_override not in ('true', 'mixed')):
+                sample['optional_diagnostics_skipped_after_readiness'] = True
+                break
+            if time.monotonic() - last_identity_sample[0] >= 15:
+                observe_processes()
+            for key, allowed in (
+                ('service.bootanim.exit', ('', '0', '1')),
+                ('init.svc.bootanim', ('', 'running', 'stopped', 'restarting', 'stopping')),
+            ):
+                prop = readiness_query(['/system/bin/getprop', key])
+                value = prop.stdout.strip() if prop.returncode == 0 else 'unavailable'
+                sample[key] = value if value in allowed else 'unclassified'
+            power = readiness_query(['/system/bin/timeout', '8', '/system/bin/dumpsys', 'power'], 12)
+            sample['power_query_exit'] = power.returncode
+            wakefulness = re.search(r'\bmWakefulness=(Awake|Asleep|Dreaming|Dozing)\b', power.stdout)
+            screen = re.search(r'\bDisplay Power:\s*state=(ON|OFF|DOZE|DOZE_SUSPEND|VR|ON_SUSPEND)\b', power.stdout)
+            sample['power_wakefulness'] = wakefulness[1] if wakefulness else 'unavailable'
+            sample['power_screen_state'] = screen[1] if screen else 'unavailable'
+            time.sleep(min(3, max(0, readiness_deadline - time.monotonic())))
+        meta = owned_container(cid)
+        profile_report['container_running'] = meta['State']['Running']
+        profile_report['container_oom_killed'] = meta['State']['OOMKilled']
+        profile_report['boot_only_pass'] = (meta['State']['Running'] and not meta['State']['OOMKilled'] and boot == '1' and properties == {
+            'ro.build.version.sdk': '35', 'ro.product.cpu.abi': 'arm64-v8a',
+            'ro.dalvik.vm.native.bridge': '0'} and all(services.values()) and
+            profile_report['wms_responsive'] and profile_report['display_ready'] and profile_report['system_booted'] and
+            profile_report.get('secure_window_override_observation') not in ('true', 'mixed'))
+        if not profile_report['boot_only_pass']:
+            raise RuntimeError('Actual platform readiness failed')
+
+    def boot_profile(profile, network, overlays, readiness_seconds):
+        profile_report = {'graphics_profile': profile, 'network': network, 'boot_only_pass': False,
+                          'readiness_budget_seconds': readiness_seconds,
+                          'readonly_overlay_count': len(overlays)}
+        report['boot_profiles'].append(profile_report)
+        report['phase'] = profile + '_boot'
+        try:
+            create_and_boot(profile_report, network, overlays, readiness_seconds)
+        finally:
+            if not profile_report['boot_only_pass'] and cid is not None:
+                try:
+                    metadata = owned_container(cid)
+                    if metadata['State']['Running']:
+                        profile_report['failure_log_diagnostics'] = sibling('android_boot_diagnostics').collect_boot_log(
+                            docker, cid, bounded_capture)
+                except Exception:
+                    profile_report['failure_log_diagnostics'] = {'complete': False, 'error_class': 'Unavailable'}
+        return profile_report
+
+    def stop_empty_stock(profile_report):
+        nonlocal cid, cidfile
+        assert profile_report['graphics_profile'] == 'stock' and profile_report['boot_only_pass']
+        metadata = owned_container(cid)
+        assert metadata['State']['Running']
+        # Observe the actual guest paths, so Android's absolute /data symlinks stay
+        # inside the container rather than being resolved against the host root.
+        for package in (PACKAGE, PACKAGE + '.test'):
+            for root in ('/data/user/0/', '/data/user_de/0/'):
+                for flag in ('-e', '-L'):
+                    absent = command(docker + ['exec', cid, '/system/bin/test', flag, root + package], 5)
+                    assert absent.returncode == 1 and not absent.stdout.strip()
+        assert (data.stat().st_dev, data.stat().st_ino) == data_identity
+        checked(docker + ['stop', '--time', '10', cid], 25)
+        metadata = owned_container(cid)
+        assert not metadata['State']['Running'] and metadata['State']['Pid'] == 0
+        assert metadata['State']['Status'] == 'exited'
+        profile_report['stopped_with_pid_zero'] = True
+        checked(docker + ['rm', cid], 20)
+        profile_report['owned_stock_container_removed'] = True
+        profile_report['target_app_state_absent_before_transition'] = True
+        cid = None
+        cidfile = None  # Retire only the removed stock CID; do not recover it during later cleanup.
+        report['owned_container_removed'] = True
+        assert (data.stat().st_dev, data.stat().st_ino) == data_identity
+        assert_no_data_mounters(docker, data, command)
+        report['sequential_data_transition'] = {'same_fresh_owned_data_identity': True,
+                                              'target_app_state_absent': True,
+                                              'running_overlapping_data_mounters': 0}
+
     try:
         assert os.geteuid() == 0 and platform.machine() == 'aarch64'
         assert os.sysconf('SC_PAGE_SIZE') == 4096
         assert docker[0] is not None
-        hal = sibling('receive_public_hal').receive(lab_args.hal, work / 'hal')
+        hal = (sibling('receive_public_hal').receive(lab_args.hal, work / 'hal')
+               if lab_args.stage in ('d3d', 'game') else None)
         modprobe = shutil.which('modprobe')
         modinfo = shutil.which('modinfo')
         assert modprobe is not None and modinfo is not None
@@ -641,161 +1014,37 @@ def run_lab(args):
         assert identity['Id'] == expected_image_id and identity['Architecture'] == 'arm64'
         assert identity['Os'] == 'linux' and image in identity['RepoDigests']
         report['pinned_image_id'] = identity['Id']
-        report['phase'] = 'public_cache_overlay'
-        cache_overlay = prepare_cache_overlay(docker, image, expected_image_id, work, owner, command)
-        report['one_optional_cache_property_overlay_sha256'] = cache_overlay['sha256']
-        report['phase'] = 'container_create'
-        args = docker + ['create', '--pull=never', '--platform=linux/arm64', '--name', name,
-            '--cidfile', str(cidfile), '--label', 'io.wowforever.boot-owner=' + owner,
-            '--privileged', '--network=bridge', '--cpus=4', '--memory=8g', '--memory-swap=8g',
-            '--mount', 'type=bind,src=' + str(data) + ',dst=/data']
-        for node in ('binder', 'hwbinder', 'vndbinder'):
-            args += ['--mount', 'type=bind,src=' + str(binderfs / node) + ',dst=/dev/' + node]
-        for entry in hal['readonly_bind_targets']:
-            args += ['--mount', 'type=bind,src=' + entry['source'] + ',dst=' + entry['destination'] + ',readonly']
-        args += ['--mount', 'type=bind,src=' + cache_overlay['source'] + ',dst=/system/build.prop,readonly']
-        args += [image, 'androidboot.use_memfd=1', 'androidboot.redroid_width=540',
-                 'androidboot.redroid_height=960', 'androidboot.redroid_dpi=240',
-                 'androidboot.redroid_gpu_mode=guest']
-        checked(args, 30)
-        cid = cidfile.read_text().strip()
-        assert re.fullmatch('[0-9a-f]{64}', cid)
-        meta = owned_container(cid)
-        assert meta['HostConfig']['Memory'] == 8589934592
-        assert meta['HostConfig']['MemorySwap'] == 8589934592
-        assert meta['HostConfig']['NanoCpus'] == 4000000000
-        assert meta['HostConfig']['NetworkMode'] == 'bridge'
-        assert not meta['HostConfig']['PortBindings']
-        mounts = {row['Destination']: row for row in meta['Mounts']}
-        for entry in hal['readonly_bind_targets']:
-            row = mounts[entry['destination']]
-            assert row['Type'] == 'bind' and row['RW'] is False and row['Source'] == entry['source']
-        row = mounts['/system/build.prop']
-        assert row['Type'] == 'bind' and row['RW'] is False and row['Source'] == cache_overlay['source']
-        report['phase'] = 'container_start'
-        checked(docker + ['start', cid], 30)
-        report['owned_container_started'] = True
-        report['phase'] = 'boot_wait'
-        boot_deadline = min(deadline - 30, time.monotonic() + 300)
-        boot = ''
-        while time.monotonic() < boot_deadline:
-            meta = owned_container(cid)
-            if not meta['State']['Running']:
-                report['container_exit_code'] = meta['State']['ExitCode']
-                break
-            try:
-                query = command(docker + ['exec', cid, '/system/bin/getprop', 'sys.boot_completed'], 10)
-                if query.returncode == 0 and query.stdout.strip() == '1':
-                    boot = '1'
-                    break
-            except subprocess.TimeoutExpired:
-                pass
-            time.sleep(3)
-        report['boot_completed'] = boot == '1'
-        report['phase'] = 'readiness'
-        properties = {}
-        for key in ('ro.build.version.sdk', 'ro.product.cpu.abi', 'ro.dalvik.vm.native.bridge'):
-            query = command(docker + ['exec', cid, '/system/bin/getprop', key], 10)
-            value = query.stdout.strip() if query.returncode == 0 else ''
-            properties[key] = value if re.fullmatch('[A-Za-z0-9._-]{0,64}', value) else 'unclassified'
-        report['public_properties'] = properties
-        services = {}
-        for service in ('window', 'SurfaceFlinger'):
-            query = command(docker + ['exec', cid, '/system/bin/service', 'check', service], 10)
-            services[service] = query.returncode == 0 and query.stdout.strip() == 'Service ' + service + ': found'
-        report['public_services_found'] = services
-        readiness_deadline = min(deadline - 30, time.monotonic() + 90)
-        report['readiness_samples'] = []
-        report['wms_responsive'] = report['display_enabled'] = report['system_booted'] = report['display_ready'] = False
-
-        def readiness_query(args, seconds=10):
-            remaining = readiness_deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError()
-            return command(docker + ['exec', cid] + args, min(seconds, remaining))
-
-        def public_boolean(text, key):
-            values = set(re.findall(r'\b' + re.escape(key) + r'=(true|false)\b', text))
-            return next(iter(values)) if len(values) == 1 else ('mixed' if values else 'unavailable')
-
-        while time.monotonic() < readiness_deadline:
-            before_wms = time.monotonic()
-            query = readiness_query(['/system/bin/timeout', '10', '/system/bin/dumpsys', 'window', '-a'], 15)
-            report['wms_query_seconds'] = round(time.monotonic() - before_wms, 3)
-            report['wms_query_exit'] = query.returncode
-            report['wms_responsive'] = query.returncode == 0 and 'WINDOW MANAGER' in query.stdout
-            report['display_enabled'] = 'mDisplayEnabled=true' in query.stdout
-            report['system_booted'] = 'mSystemBooted=true' in query.stdout
-            private_display = public_boolean(query.stdout, 'mDisplayEnabled')
-            display_exit = state = valid = default_on = None
-            rows = []
-            if private_display == 'unavailable':
-                display = readiness_query(['/system/bin/cmd', 'display', 'get-displays'])
-                display_exit = display.returncode
-                rows = [line for line in display.stdout.splitlines() if re.match(r'^\s*Display id 0: ', line)]
-                state, valid = 'unavailable', False
-                if display_exit == 0 and len(rows) == 1:
-                    value = re.search(r', state (UNKNOWN|OFF|ON|DOZE|DOZE_SUSPEND|VR|ON_SUSPEND)(?=[, }])', rows[0])
-                    validity = re.search(r', isValid=(true|false)\s*$', rows[0])
-                    state = value[1] if value else 'unclassified'
-                    valid = validity is not None and validity[1] == 'true'
-                default_on = display_exit == 0 and len(rows) == 1 and valid and state == 'ON'
-            report['default_display_on'] = default_on
-            report['private_display_enabled_observation'] = private_display
-            report['display_ready'] = private_display == 'true' or (
-                private_display == 'unavailable' and report['default_display_on'])
-            report['display_readiness_source'] = ('verbose_wms' if private_display == 'true' else
-                ('public_default_display_on' if report['display_ready'] else 'unavailable_or_not_ready'))
-            sample = {'elapsed_seconds': round(time.monotonic() - started, 3),
-                      'wms_exit': query.returncode, 'wms_responsive': report['wms_responsive'],
-                      'wms_seconds': report['wms_query_seconds'], 'display_query_exit': display_exit,
-                      'default_display_id': 0 if len(rows) == 1 else None,
-                      'default_display_state': state, 'default_display_valid': valid,
-                      'default_display_row_count': len(rows) if display_exit is not None else None,
-                      'fixed_wms_flags': {
-                          key: public_boolean(query.stdout, key) for key in (
-                              'mDisplayEnabled', 'mSystemBooted', 'mBootAnimationStopped',
-                              'mDisplayFrozen', 'mDisplayReady')}}
-            report['readiness_samples'].append(sample)
-            if report['wms_responsive'] and report['display_ready'] and report['system_booted']:
-                sample['optional_diagnostics_skipped_after_readiness'] = True
-                break
-            for key, allowed in (
-                ('service.bootanim.exit', ('', '0', '1')),
-                ('init.svc.bootanim', ('', 'running', 'stopped', 'restarting', 'stopping')),
-            ):
-                prop = readiness_query(['/system/bin/getprop', key])
-                value = prop.stdout.strip() if prop.returncode == 0 else 'unavailable'
-                sample[key] = value if value in allowed else 'unclassified'
-            power = readiness_query(['/system/bin/timeout', '8', '/system/bin/dumpsys', 'power'], 12)
-            sample['power_query_exit'] = power.returncode
-            wakefulness = re.search(r'\bmWakefulness=(Awake|Asleep|Dreaming|Dozing)\b', power.stdout)
-            screen = re.search(r'\bDisplay Power:\s*state=(ON|OFF|DOZE|DOZE_SUSPEND|VR|ON_SUSPEND)\b', power.stdout)
-            sample['power_wakefulness'] = wakefulness[1] if wakefulness else 'unavailable'
-            sample['power_screen_state'] = screen[1] if screen else 'unavailable'
-            time.sleep(min(3, max(0, readiness_deadline - time.monotonic())))
-        meta = owned_container(cid)
-        report['container_running'] = meta['State']['Running']
-        report['container_oom_killed'] = meta['State']['OOMKilled']
-        report['boot_only_pass'] = (meta['State']['Running'] and not meta['State']['OOMKilled'] and boot == '1' and properties == {
-            'ro.build.version.sdk': '35', 'ro.product.cpu.abi': 'arm64-v8a',
-            'ro.dalvik.vm.native.bridge': '0'} and all(services.values()) and
-            report['wms_responsive'] and report['display_ready'] and report['system_booted'])
-        if not report['boot_only_pass']:
-            raise RuntimeError('Actual platform readiness failed')
+        if lab_args.stage in ('native', 'tls'):
+            selected_profile = boot_profile('stock', 'bridge', [], 90)
+        else:
+            stock = boot_profile('stock', 'none', [], 90)
+            stop_empty_stock(stock)
+            report['phase'] = 'public_cache_overlay'
+            cache_overlay = prepare_cache_overlay(docker, image, expected_image_id, work, owner, command)
+            report['one_optional_cache_property_overlay_sha256'] = cache_overlay['sha256']
+            overlays = hal['readonly_bind_targets'] + [cache_overlay]
+            selected_profile = boot_profile('stock_warm_lavapipe', 'bridge', overlays, 180)
+        report['graphics_profile'] = selected_profile['graphics_profile']
+        report['boot_only_pass'] = selected_profile['boot_only_pass']
         report['phase'] = 'native_components' if lab_args.stage == 'native' else 'installed_runtime_test'
         bootenv = boot_environment(docker, cid, command)
         report['public_boot_environment_keys'] = sorted(bootenv)
-        selected = installed_component_stage(docker, cid, command, bootenv, hal, lab_args, deadline)
+        report['install_progress'] = {}
+        selected = installed_component_stage(docker, cid, command, bootenv, hal, lab_args, deadline,
+                                             report['install_progress'])
         if lab_args.stage == 'native':
             report['native_components'] = selected
             report['native_component9_pass'] = selected['passed']
         else:
             report['installed_runtime_test'] = selected
             report['installed_runtime_test_pass'] = selected['passed']
+            if lab_args.stage == 'game':
+                report.update({'verdict_scope': 'automated_game_capture_only',
+                               'visual_login_review_required': True, 'visible_login_confirmed': False,
+                               'dummy_input_test_completed': False, 'credential_use_approved': False})
         if not selected['passed']:
             raise RuntimeError('Actual selected component stage failed')
-        report['unimplemented_stages'] = ['game', 'unsent_input']
+        report['unimplemented_stages'] = ['unsent_input']
         report['phase'] = 'complete'
     except Exception as failure:
         report['incomplete'] = True
@@ -804,7 +1053,7 @@ def run_lab(args):
             'FileNotFoundError', 'PermissionError', 'ValueError', 'KeyError', 'OSError') else 'OtherError'
     finally:
         try:
-            if cid is None and cidfile.is_file():
+            if cid is None and cidfile is not None and cidfile.is_file():
                 candidate = cidfile.read_text().strip()
                 if re.fullmatch('[0-9a-f]{64}', candidate):
                     cid = candidate

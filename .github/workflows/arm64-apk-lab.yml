@@ -13,7 +13,7 @@ name: Native ARM64 APK lab
       stage:
         description: Test stage
         type: choice
-        options: [access, native, d3d, tls, prelogin-probes]
+        options: [access, native, d3d, tls, game, prelogin-probes]
         default: native
 
 permissions:
@@ -62,7 +62,9 @@ jobs:
 
   apk-lab:
     needs: verify-draft
-    if: inputs.stage == 'native' || inputs.stage == 'd3d' || inputs.stage == 'tls' || inputs.stage == 'prelogin-probes'
+    if: >-
+      inputs.stage == 'native' || inputs.stage == 'd3d' || inputs.stage == 'tls' ||
+      inputs.stage == 'game' || inputs.stage == 'prelogin-probes'
     permissions:
       contents: write
     strategy:
@@ -70,7 +72,7 @@ jobs:
       matrix:
         stage: ${{ fromJSON(inputs.stage == 'prelogin-probes' && '["native", "d3d", "tls"]' || format('["{0}"]', inputs.stage)) }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 35
+    timeout-minutes: ${{ matrix.stage == 'game' && 55 || 35 }}
     steps:
       - name: Obtain the exact public workflow sources without credentials
         shell: bash
