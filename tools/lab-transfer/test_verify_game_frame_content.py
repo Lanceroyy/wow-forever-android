@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import struct
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 spec = importlib.util.spec_from_file_location('verify_game_frame_content',
@@ -119,6 +121,98 @@ class FixedContentObservationTests(unittest.TestCase):
                     'dummy_input_test_completed', 'credential_use_approved', 'raw_ocr_or_images_exported'):
             self.assertFalse(result[key])
         self.assertNotIn('private-canary', json.dumps(result))
+
+
+class StationaryGoldObservationTests(unittest.TestCase):
+    def test_gold_mask_keeps_reference_antialiasing_but_rejects_other_colors(self):
+        pixels = ((255, 210, 0), (140, 115, 0), (140, 95, 35),
+                  (255, 255, 255), (0, 0, 0), (255, 80, 0), (100, 255, 0), (255, 210, 150))
+        self.assertEqual(subject.gold_stroke_mask(bytes(channel for rgb in pixels for channel in rgb)),
+                         bytes((255, 255, 255, 0, 0, 0, 0, 0)))
+        with self.assertRaises(subject.ContentError):
+            subject.gold_stroke_mask(b'broken!')
+
+    def test_stationary_gold_requires_three_aligned_masks(self):
+        with self.assertRaises(subject.ContentError):
+            subject.stationary_gold_labels([], 10**12)
+        frames = [((960, 540), (2, 2), bytes((0, 255, 0, 0)))] * 2
+        frames += [((1280, 720), (2, 2), bytes((0, 255, 0, 0)))]
+        result = subject.stationary_gold_labels(frames, 10**12)
+        self.assertTrue(result['analysis_complete'])
+        self.assertFalse(result['three_aligned_frames'])
+        self.assertFalse(any(result['login_labels'].values()))
+        self.assertFalse(result['all_three_login_labels_observed'])
+
+    def test_expired_deadline_and_invalid_mask_dimensions_fail_without_pillow(self):
+        frames = [((100, 100), (22, 38), bytes(22 * 38))] * 3
+        with self.assertRaises(subject.ContentError) as failure:
+            subject.stationary_gold_labels(frames, 0)
+        self.assertEqual(str(failure.exception), 'analysis_deadline')
+        frames[2] = ((100, 100), (22, 38), b'wrong')
+        with self.assertRaises(subject.ContentError) as failure:
+            subject.stationary_gold_labels(frames, 10**12)
+        self.assertEqual(str(failure.exception), 'gold_mask_dimensions')
+
+    def test_only_three_frame_intersection_and_correct_band_label_survive(self):
+        class Mask:
+            def __init__(self, size, raw):
+                self.size, self.raw = size, raw
+                self.width, self.height = size
+
+            def tobytes(self):
+                return self.raw
+
+            def crop(self, box):
+                left, top, right, bottom = box
+                return Mask((right - left, bottom - top), bytes(
+                    self.raw[y * self.width + x] for y in range(top, bottom) for x in range(left, right)))
+
+            def point(self, function):
+                return Mask(self.size, bytes(map(function, self.raw)))
+
+            def resize(self, size, resample):
+                return Mask(size, bytes(size[0] * size[1]))
+
+            def close(self):
+                pass
+
+        image = SimpleNamespace(frombytes=lambda mode, size, raw: Mask(size, raw),
+                                Resampling=SimpleNamespace(BICUBIC=3))
+        chops = SimpleNamespace(darker=lambda first, second: Mask(first.size, bytes(map(min, first.raw, second.raw))))
+        # Three stationary points occupy the separate fixed label bands;
+        # one moving point is deliberately missing from the third frame.
+        size = (22, 38)
+        fixed = [0] * (size[0] * size[1])
+        for row in (4, 12, 31):
+            fixed[row * size[0] + 10] = 255
+        moving = fixed.copy()
+        moving[5] = 255
+        frames = [((100, 100), size, bytes(moving)), ((100, 100), size, bytes(moving)),
+                  ((100, 100), size, bytes(fixed))]
+        only_login = {'email_or_phone': False, 'password': False, 'log_in': True}
+        with patch.dict('sys.modules', {'PIL': SimpleNamespace(Image=image, ImageChops=chops)}), \
+                patch.object(subject, 'ocr_labels', return_value=only_login) as ocr:
+            result = subject.stationary_gold_labels(frames, 10**12)
+        self.assertEqual(result['input_gold_pixels'], [4, 4, 3])
+        self.assertEqual(result['stationary_gold_pixels'], 3)
+        self.assertEqual(result['band_gold_pixels'], dict.fromkeys(subject.LABELS, 1))
+        self.assertEqual(result['login_labels'], only_login)
+        self.assertFalse(result['all_three_login_labels_observed'])
+        self.assertEqual([call.args[1] for call in ocr.call_args_list], [7, 7, 7])
+        self.assertTrue(result['analysis_complete'])
+        self.assertNotIn('credential_use_approved', result)
+        # All full phrases must be recognized in their own bands. Gold pixels
+        # alone and the same Log In token returned in all three reads do not pass.
+        with patch.dict('sys.modules', {'PIL': SimpleNamespace(Image=image, ImageChops=chops)}), \
+                patch.object(subject, 'ocr_labels', return_value=dict.fromkeys(subject.LABELS, True)):
+            self.assertTrue(subject.stationary_gold_labels(frames, 10**12)['all_three_login_labels_observed'])
+        blank = [((100, 100), size, bytes(size[0] * size[1]))] * 3
+        with patch.dict('sys.modules', {'PIL': SimpleNamespace(Image=image, ImageChops=chops)}), \
+                patch.object(subject, 'ocr_labels', side_effect=AssertionError('Empty bands must not invoke OCR')):
+            empty = subject.stationary_gold_labels(blank, 10**12)
+        self.assertEqual(empty['stationary_gold_pixels'], 0)
+        self.assertFalse(any(empty['login_labels'].values()))
+        self.assertFalse(empty['all_three_login_labels_observed'])
 
 
 if __name__ == '__main__':

@@ -18,6 +18,10 @@ SCOPE = 'Actual Session render-path captures; visual review required; no login a
 WINE_NAMES = {'libwow_wine_ntdll.so', 'libwow_wine_loader.so', 'libwow_wine_preloader.so'}
 MAX_PIXELS = 4_194_304
 LABELS = ('email_or_phone', 'password', 'log_in')
+# Fixed proportions of the user's 960x540 reference. The horizontal bounds
+# exclude its cursor; no search or frame registration moves these bands.
+GOLD_CROP = (39, 43, 61, 81)
+GOLD_LABEL_BANDS = (('email_or_phone', 44, 50), ('password', 55, 61), ('log_in', 74, 80))
 
 
 class ContentError(Exception):
@@ -130,6 +134,70 @@ def rgb_motion(before, after):
     return {'comparable': True, 'sample_pixels': len(before) // 3, 'changed_pixels_delta_ge_16': changed}
 
 
+def gold_stroke_mask(rgb):
+    """Keep only reference-colored gold strokes; the mask stays private."""
+    require(len(rgb) > 0 and len(rgb) % 3 == 0, 'gold_pixel_buffer')
+    return bytes(255 if red >= 140 and green >= 95 and red >= green - 12
+                 and red - green <= 82 and blue * 2 <= green and green - blue >= 60 else 0
+                 for red, green, blue in zip(rgb[0::3], rgb[1::3], rgb[2::3]))
+
+
+def stationary_gold_labels(frames, deadline):
+    """Observe fixed labels on an explicitly identified three-frame composite."""
+    require(len(frames) == 3, 'gold_frame_count')
+    require(time.monotonic() < deadline, 'analysis_deadline')
+    result = {'analysis_complete': False, 'three_aligned_frames': False,
+              'scope': 'Three-frame gold-mask intersection; fixed ordered label bands only',
+              'input_gold_pixels': [raw.count(255) for _, _, raw in frames],
+              'stationary_gold_pixels': None, 'band_gold_pixels': dict.fromkeys(LABELS, None),
+              'login_labels': dict.fromkeys(LABELS, False), 'all_three_login_labels_observed': False}
+    if len({(full_size, size) for full_size, size, _ in frames}) != 1:
+        result['analysis_complete'] = True
+        return result
+    (width, height), size, _ = frames[0]
+    left, top, right, bottom = GOLD_CROP
+    require(size == (width * right // 100 - width * left // 100,
+                     height * bottom // 100 - height * top // 100)
+            and min(size) > 0 and all(len(raw) == size[0] * size[1] for _, _, raw in frames),
+            'gold_mask_dimensions')
+    from PIL import Image, ImageChops
+    with ExitStack() as closing:
+        masks = []
+        for _, _, raw in frames:
+            mask = Image.frombytes('L', size, raw)
+            closing.callback(mask.close)
+            masks.append(mask)
+        first = ImageChops.darker(masks[0], masks[1])
+        closing.callback(first.close)
+        stationary = ImageChops.darker(first, masks[2])
+        closing.callback(stationary.close)
+        result['three_aligned_frames'] = True
+        result['stationary_gold_pixels'] = stationary.tobytes().count(255)
+        for label, upper, lower in GOLD_LABEL_BANDS:
+            require(time.monotonic() < deadline, 'analysis_deadline')
+            band = stationary.crop((0, height * upper // 100 - height * top // 100,
+                                    size[0], height * lower // 100 - height * top // 100))
+            try:
+                count = band.tobytes().count(255)
+                result['band_gold_pixels'][label] = count
+                if not count:
+                    continue
+                inverted = band.point(lambda value: 255 - value)
+                try:
+                    enlarged = inverted.resize((band.width * 3, band.height * 3), Image.Resampling.BICUBIC)
+                    try:
+                        result['login_labels'][label] = ocr_labels(enlarged, 7, deadline)[label]
+                    finally:
+                        enlarged.close()
+                finally:
+                    inverted.close()
+            finally:
+                band.close()
+        result['all_three_login_labels_observed'] = all(result['login_labels'].values())
+        result['analysis_complete'] = True
+    return result
+
+
 def file_identity(value):
     return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_nlink)
 
@@ -176,7 +244,7 @@ def ocr_labels(image, psm, deadline):
     with os.fdopen(descriptor, 'w+b') as output:
         result = subprocess.run(['/usr/bin/tesseract', 'stdin', 'stdout', '-l', 'eng', '--psm', str(psm)],
             input=source.getvalue(), stdout=output, stderr=subprocess.DEVNULL,
-            timeout=min(6, remaining), preexec_fn=bound_output,
+            timeout=min(3 if psm == 7 else 6, remaining), preexec_fn=bound_output,
             env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'OMP_THREAD_LIMIT': '1'})
         output.seek(0)
         text = output.read(limit + 1)
@@ -224,6 +292,7 @@ def verify_game_frame_content(data_root, receipt_basename, *, data_identity, own
             result['receipt_and_game_metadata_validated'] = True
             from PIL import Image
             bands = []
+            gold_frames = []
             bound_identities = {receipt_basename: receipt_identity}
             for index, frame in enumerate(frames):
                 result['phase'] = 'png_validation'
@@ -236,6 +305,10 @@ def verify_game_frame_content(data_root, receipt_basename, *, data_identity, own
                     opened.load()
                     image = opened.convert('RGB')
                 width, height = image.size
+                left, top, right, bottom = GOLD_CROP
+                with image.crop((width * left // 100, height * top // 100,
+                                 width * right // 100, height * bottom // 100)) as gold:
+                    gold_frames.append((image.size, gold.size, gold_stroke_mask(gold.tobytes())))
                 row = {'index': index, 'width': width, 'height': height,
                        'game_window_count': len(frame['windows']), 'native_game_process_count': len(frame['native_processes']),
                        'png_digest_and_dimensions_verified': True, 'peripheral': {},
@@ -267,6 +340,8 @@ def verify_game_frame_content(data_root, receipt_basename, *, data_identity, own
                 finally:
                     central.close()
                     image.close()
+            result['phase'] = 'stationary_gold_ocr'
+            result['stationary_gold_label_check'] = stationary_gold_labels(gold_frames, deadline)
             result['phase'] = 'motion_analysis'
             result['peripheral_motion'] = []
             for first, second in ((0, 1), (1, 2)):
