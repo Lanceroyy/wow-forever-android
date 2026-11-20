@@ -156,10 +156,10 @@ def runtime_command(log_reset_exit=0, stop_exit=0):
 
 
 class InstalledRuntimeStageTests(unittest.TestCase):
-    def run_stage(self, stage, captures, **command_options):
+    def run_stage(self, stage, captures, expected_system_server=None, **command_options):
         with patch.object(lab, 'bounded_capture', side_effect=[*captures, ('', 0, False, False)]) as capture:
             result = lab.runtime_test(stage, ['docker'], 'cid', runtime_command(**command_options),
-                                      {'ANDROID_ROOT': '/system'}, 10**12)
+                                      {'ANDROID_ROOT': '/system'}, 10**12, expected_system_server)
         return result, capture
 
     def test_exact_fixtures_and_specialized_contracts_pass_separately(self):
@@ -223,6 +223,16 @@ class InstalledRuntimeStageTests(unittest.TestCase):
         result, capture = self.run_stage('tls', [], stop_exit=1)
         self.assertFalse(result['passed'])
         self.assertEqual(result['failure_phase'], 'fresh_process')
+        capture.assert_not_called()
+
+    def test_snapshot_experiment_rejects_restarted_system_server_before_test(self):
+        before = {'status': 'observed', 'pid': 123, 'start_ticks': 333}
+        after = {'status': 'observed', 'pid': 123, 'start_ticks': 444}
+        with patch.object(lab, 'platform_process_snapshot', return_value={'system_server': after}):
+            result, capture = self.run_stage('d3d', [], expected_system_server=before)
+        self.assertFalse(result['passed'])
+        self.assertFalse(result['snapshot_control_server_matches'])
+        self.assertFalse(result['milestones']['instrumentation_started'])
         capture.assert_not_called()
 
     def test_numeric_diagnostics_bound_rows_and_never_export_unknown_text(self):
@@ -402,6 +412,128 @@ class StockProfileBoundaryTests(unittest.TestCase):
         result = lab.platform_process_snapshot(['docker'], 'cid', command)
         self.assertTrue(all(value == {'status': 'unavailable'} for value in result.values()))
         self.assertNotIn('private-runtime-canary', json.dumps(result))
+
+
+class SnapshotControlBoundaryTests(unittest.TestCase):
+    marker = 'LAB_SNAPSHOT_API_SET enabled=false proxy=android.view.IWindowManager$Stub$Proxy'
+
+    @staticmethod
+    def state(enabled, secure='false', cache='Task'):
+        return ('WINDOW MANAGER\nmDisableSecureWindows=' + secure + '\n'
+                'mSnapshotEnabled=' + enabled + '\n  SnapshotCache ' + cache + '\n')
+
+    def attempt(self, captures=None, identities=None, remote_hash=None):
+        original = {'status': 'observed', 'pid': 123, 'start_ticks': 456}
+        process_states = [{'system_server': value} for value in (identities or [original] * 3)]
+        captured = captures if captures is not None else [
+            (self.state('true'), 0, False, False), (self.marker, 0, False, False),
+            (self.state('false'), 0, False, False)]
+        progress = {}
+
+        def command(args, seconds):
+            if 'cp' in args:
+                return completed()
+            if '/system/bin/sha256sum' in args:
+                return completed(output=(remote_hash or lab.SNAPSHOT_DEX_SHA) + '  lab.dex')
+            if '/system/bin/stat' in args:
+                return completed(output='2444')
+            raise AssertionError('Unexpected snapshot-control command')
+
+        with patch.object(lab, 'verify_input') as verify, \
+                patch.object(lab, 'platform_process_snapshot', side_effect=process_states), \
+                patch.object(lab, 'bounded_capture', side_effect=captured) as capture:
+            failure = None
+            try:
+                lab.disable_lab_task_snapshots(['docker'], 'cid', command,
+                    {'BOOTCLASSPATH': '/system/framework/framework.jar', 'ANDROID_ROOT': '/system'},
+                    Path('public-lab.dex'), progress, 10**12)
+            except Exception as error:
+                failure = error
+        return progress, failure, capture, verify
+
+    def test_real_proxy_confirmation_and_same_server_postconditions_required(self):
+        result, failure, capture, verify = self.attempt()
+        self.assertIsNone(failure)
+        self.assertTrue(result['applied_and_verified'])
+        self.assertTrue(result['task_snapshot_enabled_before'])
+        self.assertFalse(result['task_snapshot_enabled_after'])
+        self.assertFalse(result['secure_window_override_before'])
+        self.assertFalse(result['secure_window_override_after'])
+        self.assertTrue(result['same_system_server_pid_and_start_ticks'])
+        self.assertEqual(result['phase'], 'complete')
+        verify.assert_called_once_with(Path('public-lab.dex'), 2444, lab.SNAPSHOT_DEX_SHA)
+        args = capture.call_args_list[1].args[0]
+        self.assertIn('BOOTCLASSPATH=/system/framework/framework.jar', args)
+        self.assertIn('CLASSPATH=/data/local/tmp/handheld-task-snapshot-control-ec3f.dex', args)
+        self.assertEqual(args[-4:], ['/system/bin/app_process', '/system/bin', 'LabSnapshotControl', 'disable'])
+
+    def test_restart_or_pid_reuse_rejects_postcondition(self):
+        original = {'status': 'observed', 'pid': 123, 'start_ticks': 456}
+        for changed in ({'status': 'observed', 'pid': 124, 'start_ticks': 457},
+                        {'status': 'observed', 'pid': 123, 'start_ticks': 999}):
+            with self.subTest(changed=changed):
+                result, failure, _, _ = self.attempt(identities=[original, original, changed])
+                self.assertIsInstance(failure, ValueError)
+                self.assertFalse(result['applied_and_verified'])
+                self.assertFalse(result['same_system_server_pid_and_start_ticks'])
+
+    def test_secure_override_true_or_mixed_rejected_before_setter(self):
+        for state in (self.state('true', 'true'), self.state('true') + 'mDisableSecureWindows=true\n'):
+            with self.subTest(state=state):
+                result, failure, capture, _ = self.attempt(captures=[(state, 0, False, False)])
+                self.assertIsInstance(failure, ValueError)
+                self.assertFalse(result['api_invoked'])
+                self.assertFalse(result['applied_and_verified'])
+                self.assertEqual(capture.call_count, 1)
+
+    def test_activity_snapshot_flag_cannot_replace_task_flag(self):
+        for text in (self.state('false', cache='Activity'),
+                     self.state('true') + self.state('false')):
+            with self.subTest(text=text):
+                result, failure, _, _ = self.attempt(captures=[(text, 0, False, False)])
+                self.assertIsInstance(failure, ValueError)
+                self.assertFalse(result['api_invoked'])
+
+    def test_still_enabled_after_setter_rejected(self):
+        result, failure, _, _ = self.attempt(captures=[
+            (self.state('true'), 0, False, False), (self.marker, 0, False, False),
+            (self.state('true'), 0, False, False)])
+        self.assertIsInstance(failure, ValueError)
+        self.assertFalse(result['applied_and_verified'])
+        self.assertTrue(result['task_snapshot_enabled_after'])
+
+    def test_missing_marker_or_capture_limits_cannot_apply_control(self):
+        for value in (('private-helper-error-canary', 0, False, False),
+                      (self.marker, 1, False, False), (self.marker, 0, True, False),
+                      (self.marker, 0, False, True)):
+            with self.subTest(value=value):
+                result, failure, _, _ = self.attempt(captures=[(self.state('true'), 0, False, False), value])
+                self.assertIsInstance(failure, ValueError)
+                self.assertFalse(result['applied_and_verified'])
+                self.assertNotIn('private-helper-error-canary', json.dumps(result))
+
+    def test_wrong_remote_dex_rejected_before_api(self):
+        result, failure, capture, _ = self.attempt(remote_hash='0' * 64)
+        self.assertIsInstance(failure, ValueError)
+        self.assertFalse(result['api_invoked'])
+        self.assertFalse(result['applied_and_verified'])
+        self.assertEqual(capture.call_count, 1)
+
+    def test_option_restricted_to_graphics_lab_stages(self):
+        for stage in ('native', 'tls'):
+            with self.subTest(stage=stage), patch('sys.argv', ['lab', '--main', 'absent', '--qa', 'absent',
+                    '--hal', 'absent', '--stage', stage, '--snapshot-control-dex', 'absent']), \
+                    patch.object(lab, 'verify_input') as verify, patch.object(lab, 'run_lab') as run, \
+                    patch('sys.stdout', new_callable=io.StringIO):
+                self.assertEqual(lab.main(), 2)
+                verify.assert_not_called()
+                run.assert_not_called()
+
+    def test_default_option_does_not_request_control(self):
+        with patch('sys.argv', ['lab', '--main', 'main', '--qa', 'qa', '--hal', 'hal', '--stage', 'd3d']), \
+                patch.object(lab, 'verify_input'), patch.object(lab, 'run_lab', return_value=0) as run:
+            self.assertEqual(lab.main(), 0)
+            self.assertIsNone(run.call_args.args[0].snapshot_control_dex)
 
 
 if __name__ == '__main__':

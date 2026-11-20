@@ -15,6 +15,10 @@ name: Native ARM64 APK lab
         type: choice
         options: [access, native, d3d, tls, game, prelogin-probes]
         default: native
+      disable_task_snapshots:
+        description: Disable optional task snapshots in the disposable graphics lab
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -72,7 +76,7 @@ jobs:
       matrix:
         stage: ${{ fromJSON(inputs.stage == 'prelogin-probes' && '["native", "d3d", "tls"]' || format('["{0}"]', inputs.stage)) }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: ${{ matrix.stage == 'game' && 55 || 35 }}
+    timeout-minutes: ${{ matrix.stage == 'game' && 60 || 40 }}
     steps:
       - name: Obtain the exact public workflow sources without credentials
         shell: bash
@@ -92,15 +96,23 @@ jobs:
           python3 -I tools/lab-transfer/download_lab_inputs.py \
             --output "$RUNNER_TEMP/wow-native-lab-inputs"
       - name: Run the selected checks on the exact APK
+        # The preceding download step has already revoked the repository job token.
         shell: bash
         env:
           LAB_STAGE: ${{ matrix.stage }}
+          LAB_DISABLE_TASK_SNAPSHOTS: ${{ inputs.disable_task_snapshots }}
         run: |
           set -euo pipefail
           inputs_dir="$RUNNER_TEMP/wow-native-lab-inputs"
+          snapshot_args=()
+          if [[ "$LAB_DISABLE_TASK_SNAPSHOTS" == true && ( "$LAB_STAGE" == d3d || "$LAB_STAGE" == game ) ]]; then
+            snapshot_dir="$RUNNER_TEMP/wow-snapshot-control"
+            python3 -I tools/lab-transfer/build_lab_snapshot_control.py "$snapshot_dir"
+            snapshot_args=(--snapshot-control-dex "$snapshot_dir/classes.dex")
+          fi
           sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
             /usr/bin/python3 -I "$GITHUB_WORKSPACE/tools/lab-transfer/run_arm64_apk_lab.py" \
             --main "$inputs_dir/main.apk" \
             --qa "$inputs_dir/qa.apk" \
             --hal "$inputs_dir/candidate-public-build.tar.gz" \
-            --stage "$LAB_STAGE"
+            --stage "$LAB_STAGE" "${snapshot_args[@]}"

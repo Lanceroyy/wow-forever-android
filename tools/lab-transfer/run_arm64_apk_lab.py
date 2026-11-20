@@ -24,6 +24,7 @@ import uuid
 MAIN_SHA = '1b8e7a3be0dc490b727ec22a7d548dd1c65423ca57e7e6abe18695b10202f62e'
 QA_SHA = '859b6cc24945988fb8a55d32fc5152fee8b52dddc91d52f987b261f1a6003ac0'
 HAL_SHA = 'dc9352ca778f7fce4510fd51f1dcadd9eed6573fb3bb4fd9fd3506fdafbb943a'
+SNAPSHOT_DEX_SHA = 'ec3f9f0a2e0ea508c88167235f5347c8c5177836c4261497db9eadeeab22df6e'
 PACKAGE = 'app.wowforever.handheld'
 RUNNER = PACKAGE + '.test/androidx.test.runner.AndroidJUnitRunner'
 BOOT_KEYS = ('BOOTCLASSPATH', 'DEX2OATBOOTCLASSPATH', 'SYSTEMSERVERCLASSPATH',
@@ -259,7 +260,7 @@ def game_diagnostics(log, instrumentation):
     }
 
 
-def runtime_test(stage, docker, cid, command, bootenv, deadline):
+def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system_server=None):
     """One real installed-runtime fixture; selected-tag output stays private."""
     classname, flag, tag, seconds, scope = {
         'd3d': ('HandheldD3dProbeTest', 'handheldD3dProbe', 'HandheldD3dProbe', 600,
@@ -311,7 +312,13 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline):
             raise ValueError('Fresh selected-log boundary unavailable')
         result['milestones']['main_log_reset'] = True
         result['timings_seconds']['log_reset'] = round(time.monotonic() - before, 3)
+        phase = 'platform_identity'
         result['platform_processes_before_fixture'] = platform_process_snapshot(docker, cid, command)
+        if expected_system_server is not None:
+            matches = result['platform_processes_before_fixture']['system_server'] == expected_system_server
+            result['snapshot_control_server_matches'] = matches
+            if not matches:
+                raise ValueError('Android restarted after task snapshot control')
         remaining = deadline - time.monotonic() - 45
         if remaining <= 0:
             raise TimeoutError()
@@ -482,7 +489,94 @@ def host_veth_state():
     return {'kernel_modprobe_setting': setting, 'veth_present': Path('/sys/module/veth').is_dir()}
 
 
-def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline, install_progress=None):
+def disable_lab_task_snapshots(docker, cid, command, bootenv, dex, progress, lab_deadline):
+    """Optional real Android system API; never part of an APK or enabled by default."""
+    started = time.monotonic()
+    deadline = min(started + 90, lab_deadline - 45)
+    progress.update({'requested': True, 'applied_and_verified': False, 'api_invoked': False,
+                     'dex_sha256': SNAPSHOT_DEX_SHA, 'phase': 'local_dex_identity'})
+
+    def seconds(maximum):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Bounded snapshot-control interval expired')
+        return min(maximum, remaining)
+
+    def bounded_command(argv, maximum=10):
+        result = command(argv, seconds(maximum))
+        if result.returncode:
+            raise ValueError('Lab snapshot prerequisite failed')
+        return result.stdout.strip()
+
+    def system_identity():
+        identities = platform_process_snapshot(docker, cid,
+            lambda argv, maximum: command(argv, seconds(maximum)))
+        value = identities['system_server']
+        if value['status'] != 'observed':
+            raise ValueError('Stable Android system process is unavailable')
+        return value
+
+    def capture(argv, maximum):
+        output, exit_code, timed_out, limited = bounded_capture(argv, seconds(maximum))
+        if exit_code or timed_out or limited:
+            raise ValueError('Bounded Android snapshot-control command failed')
+        return output
+
+    def cached_state():
+        text = capture(docker + ['exec', cid, '/system/bin/timeout', '10',
+                                '/system/bin/dumpsys', 'window', '-a'], 15)
+        task = re.findall(r'\bmSnapshotEnabled=(true|false)\s*\n\s*SnapshotCache Task\b', text)
+        secure = set(re.findall(r'\bmDisableSecureWindows=(true|false)\b', text))
+        if 'WINDOW MANAGER' not in text or len(task) != 1 or secure != {'false'}:
+            raise ValueError('Task-specific cached policy or secure-window state is unproven')
+        return task[0] == 'true'
+
+    try:
+        verify_input(dex, 2444, SNAPSHOT_DEX_SHA)
+        progress['phase'] = 'before_state'
+        before = system_identity()
+        progress['system_server_before'] = before
+        progress['task_snapshot_enabled_before'] = cached_state()
+        progress['secure_window_override_before'] = False
+        if system_identity() != before:
+            raise ValueError('Android system process changed before the setter')
+        progress['phase'] = 'dex_copy'
+        remote = '/data/local/tmp/handheld-task-snapshot-control-ec3f.dex'
+        bounded_command(docker + ['cp', str(dex.resolve()), cid + ':' + remote], 20)
+        progress['phase'] = 'remote_dex_identity'
+        digest = bounded_command(docker + ['exec', cid, '/system/bin/sha256sum', remote])
+        size = bounded_command(docker + ['exec', cid, '/system/bin/stat', '-c', '%s', remote])
+        if digest.split()[0] != SNAPSHOT_DEX_SHA or size != '2444':
+            raise ValueError('Actual lab API DEX differs from the pinned public build')
+        progress['remote_dex_verified'] = True
+        prefix = docker + ['exec']
+        for key, value in bootenv.items():
+            prefix += ['--env', key + '=' + value]
+        prefix += ['--env', 'CLASSPATH=' + remote, cid]
+        progress['phase'] = 'api_call'
+        progress['api_invoked'] = True
+        output = capture(prefix + ['/system/bin/app_process', '/system/bin', 'LabSnapshotControl', 'disable'], 20)
+        expected = 'LAB_SNAPSHOT_API_SET enabled=false proxy=android.view.IWindowManager$Stub$Proxy'
+        progress['setter_success_marker_observed'] = output.strip() == expected
+        if not progress['setter_success_marker_observed']:
+            raise ValueError('Actual WindowManager proxy setter did not confirm completion')
+        progress['phase'] = 'after_state'
+        after_enabled = cached_state()
+        after = system_identity()
+        progress['system_server_after'] = after
+        progress['task_snapshot_enabled_after'] = after_enabled
+        progress['secure_window_override_after'] = False
+        progress['same_system_server_pid_and_start_ticks'] = after == before
+        if after_enabled or after != before:
+            raise ValueError('Snapshot-control postcondition was not established in the original server')
+        progress['applied_and_verified'] = True
+        progress['phase'] = 'complete'
+    finally:
+        progress['elapsed_seconds'] = round(time.monotonic() - started, 3)
+
+
+def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline, install_progress=None,
+                              expected_system_server=None):
     """Actual fixed input installs and platform loader proof before a selected stage."""
     progress = install_progress if install_progress is not None else {}
     progress.update({'phase': 'namespace', 'packages': {}, 'hal_files_verified': 0})
@@ -555,7 +649,7 @@ def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline
         progress['packages'][package]['installed_base_digest_verified'] = True
     progress['phase'] = 'complete'
     result = (component_tests(docker, cid, command, bootenv, deadline) if args.stage == 'native' else
-              runtime_test(args.stage, docker, cid, command, bootenv, deadline))
+              runtime_test(args.stage, docker, cid, command, bootenv, deadline, expected_system_server))
     result['installed_apk_sha256'] = installed
     result['public_namespace_sha256'] = expected_namespace
     result['nine_public_hal_files_hash_checked_and_mapped'] = bool(hal)
@@ -569,11 +663,18 @@ def main():
     parser.add_argument('--main', required=True, type=Path)
     parser.add_argument('--qa', required=True, type=Path)
     parser.add_argument('--hal', required=True, type=Path)
+    parser.add_argument('--snapshot-control-dex', type=Path,
+                        help='Optional pinned lab-only TaskSnapshot API helper, D3D/game only')
     parser.add_argument('--stage', choices=('native', 'd3d', 'tls', 'game', 'all'), default='native')
     args = parser.parse_args()
     if args.stage not in ('native', 'd3d', 'tls', 'game'):
         print(json.dumps({'passed': False, 'scope': 'Requested later stage is not implemented; no lab started'}))
         return 2
+    if args.snapshot_control_dex is not None:
+        if args.stage not in ('d3d', 'game'):
+            print(json.dumps({'passed': False, 'scope': 'Lab snapshot control is restricted to D3D/game; no lab started'}))
+            return 2
+        verify_input(args.snapshot_control_dex, 2444, SNAPSHOT_DEX_SHA)
     verify_input(args.main, 129571767, MAIN_SHA)
     verify_input(args.qa, 7403478, QA_SHA)
     verify_input(args.hal, 52218250, HAL_SHA)
@@ -1074,9 +1175,20 @@ def run_lab(args):
         report['phase'] = 'native_components' if lab_args.stage == 'native' else 'installed_runtime_test'
         bootenv = boot_environment(docker, cid, command)
         report['public_boot_environment_keys'] = sorted(bootenv)
+        report['snapshot_control'] = {'requested': lab_args.snapshot_control_dex is not None,
+                                      'applied_and_verified': False}
+        expected_system_server = None
+        if lab_args.snapshot_control_dex is not None:
+            report['phase'] = 'lab_snapshot_control'
+            disable_lab_task_snapshots(docker, cid, command, bootenv, lab_args.snapshot_control_dex,
+                                       report['snapshot_control'], deadline)
+            if not report['snapshot_control']['applied_and_verified']:
+                raise ValueError('Lab-only snapshot control was not verified')
+            expected_system_server = report['snapshot_control']['system_server_after']
+        report['phase'] = 'native_components' if lab_args.stage == 'native' else 'installed_runtime_test'
         report['install_progress'] = {}
         selected = installed_component_stage(docker, cid, command, bootenv, hal, lab_args, deadline,
-                                             report['install_progress'])
+                                             report['install_progress'], expected_system_server)
         if lab_args.stage == 'native':
             report['native_components'] = selected
             report['native_component9_pass'] = selected['passed']
@@ -1103,7 +1215,8 @@ def run_lab(args):
                 if re.fullmatch('[0-9a-f]{64}', candidate):
                     cid = candidate
             if cid is not None:
-                owned_container(cid, cleanup=True)
+                final_metadata = owned_container(cid, cleanup=True)
+                report['owned_container_oom_killed_before_cleanup'] = final_metadata['State']['OOMKilled']
                 subprocess.run(docker + ['stop', '--time', '10', cid], capture_output=True, timeout=20)
                 removed = subprocess.run(docker + ['rm', '--force', cid], capture_output=True, timeout=20)
                 report['owned_container_removed'] = removed.returncode == 0
