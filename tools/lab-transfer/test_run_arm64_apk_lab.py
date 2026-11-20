@@ -157,12 +157,14 @@ def runtime_command(log_reset_exit=0, stop_exit=0):
 
 
 class InstalledRuntimeStageTests(unittest.TestCase):
-    def run_stage(self, stage, captures, expected_system_server=None, frame_scope=None, **command_options):
+    def run_stage(self, stage, captures, expected_system_server=None, frame_scope=None,
+                  game_frame_warmup_seconds=None, **command_options):
         with patch.object(lab, 'bounded_capture', side_effect=[*captures, ('', 0, False, False)]) as capture, \
                 patch.object(lab, 'selected_game_log', side_effect=lambda *args:
                              nullcontext(lambda: capture(['selected game stream'], 15))):
             result = lab.runtime_test(stage, ['docker'], 'cid', runtime_command(**command_options),
-                                      {'ANDROID_ROOT': '/system'}, 10**12, expected_system_server, frame_scope)
+                                      {'ANDROID_ROOT': '/system'}, 10**12, expected_system_server, frame_scope,
+                                      game_frame_warmup_seconds)
         return result, capture
 
     def test_exact_fixtures_and_specialized_contracts_pass_separately(self):
@@ -278,6 +280,16 @@ class InstalledRuntimeStageTests(unittest.TestCase):
         self.assertEqual(capture.call_args_list[0].args[1], 2100)
         self.assertEqual(result['verification']['game_frames_captured'], 3)
         self.assertEqual(result['selected_log_capture_mode'], 'live_tagged_interval')
+
+    def test_opt_in_warmup_uses_only_the_game_fixture_readback_interval(self):
+        result, capture = self.run_stage('game', [(runtime_junit('game'), 0, False, False),
+                                                 (runtime_log('game'), 0, False, False)],
+                                         game_frame_warmup_seconds=360)
+        self.assertTrue(result['automated_game_capture_passed'])
+        self.assertEqual(result['requested_frame_warmup_seconds'], 360)
+        self.assertEqual(capture.call_args_list[0].args[0][-4:],
+                         ['-e', 'handheldFrameWarmupSeconds', '360', lab.RUNNER])
+        self.assertFalse(result['account_input_sent'])
 
     def test_frame_inspection_uses_only_the_current_verified_receipt(self):
         scope = {'data_root': Path('private-data'), 'data_identity': (9, 17),
@@ -724,6 +736,17 @@ class StockComparatorOptionTests(unittest.TestCase):
                     self.assertEqual(lab.main(), 2)
                     verify.assert_not_called()
                     run.assert_not_called()
+
+    def test_game_warmup_rejects_other_stages_and_out_of_range_values_before_inputs(self):
+        args = ['lab', '--main', 'main', '--qa', 'qa', '--hal', 'hal']
+        for stage, seconds in [('d3d', '360'), ('game', '-1'), ('game', '901')]:
+            with self.subTest(stage=stage, seconds=seconds), \
+                    patch('sys.argv', args + ['--stage', stage, '--game-frame-warmup-seconds', seconds]), \
+                    patch.object(lab, 'verify_input') as verify, patch.object(lab, 'run_lab') as run, \
+                    patch('sys.stdout', new_callable=io.StringIO):
+                self.assertEqual(lab.main(), 2)
+                verify.assert_not_called()
+                run.assert_not_called()
 
 
 if __name__ == '__main__':

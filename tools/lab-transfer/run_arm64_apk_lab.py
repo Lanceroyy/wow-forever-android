@@ -319,7 +319,8 @@ def game_diagnostics(log, instrumentation):
     }
 
 
-def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system_server=None, frame_scope=None):
+def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system_server=None, frame_scope=None,
+                 game_frame_warmup_seconds=None):
     """One real installed-runtime fixture; selected-tag output stays private."""
     classname, flag, tag, seconds, scope = {
         'd3d': ('HandheldD3dProbeTest', 'handheldD3dProbe', 'HandheldD3dProbe', 600,
@@ -391,10 +392,12 @@ def runtime_test(stage, docker, cid, command, bootenv, deadline, expected_system
             phase = 'instrumentation'
             before = time.monotonic()
             result['milestones']['instrumentation_started'] = True
-            output, exit_code, timed_out, output_limit = bounded_capture(
-                prefix + ['/system/bin/am', 'instrument', '-w', '-r', '-e', 'class',
-                          'app.gamenative.security.' + classname, '-e', flag, 'true', RUNNER],
-                min(seconds, remaining))
+            instrument = prefix + ['/system/bin/am', 'instrument', '-w', '-r', '-e', 'class',
+                                   'app.gamenative.security.' + classname, '-e', flag, 'true']
+            if game_frame_warmup_seconds is not None:
+                instrument += ['-e', 'handheldFrameWarmupSeconds', str(game_frame_warmup_seconds)]
+                result['requested_frame_warmup_seconds'] = game_frame_warmup_seconds
+            output, exit_code, timed_out, output_limit = bounded_capture(instrument + [RUNNER], min(seconds, remaining))
             result['timings_seconds']['instrumentation'] = round(time.monotonic() - before, 3)
             result.update({'instrumentation_exit_code': exit_code, 'transport_timed_out': timed_out,
                            'output_limit_reached': output_limit})
@@ -792,7 +795,8 @@ def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline
                                                               progress['renderengine_vulkan'])
     progress['phase'] = 'complete'
     result = (component_tests(docker, cid, command, bootenv, deadline) if args.stage == 'native' else
-              runtime_test(args.stage, docker, cid, command, bootenv, deadline, expected_system_server, frame_scope))
+              runtime_test(args.stage, docker, cid, command, bootenv, deadline, expected_system_server, frame_scope,
+                           getattr(args, 'game_frame_warmup_seconds', None)))
     result['installed_apk_sha256'] = installed
     result['public_namespace_sha256'] = expected_namespace
     result['nine_public_hal_files_hash_checked_and_mapped'] = bool(hal)
@@ -820,6 +824,8 @@ def main():
                         help='D3D/game comparator using one unchanged stock graphics boot')
     parser.add_argument('--inspect-game-frames', action='store_true',
                         help='Report fixed login-label and background measurements from current game captures')
+    parser.add_argument('--game-frame-warmup-seconds', type=int,
+                        help='Wait this many seconds after the real game window appears, from 0 to 900')
     parser.add_argument('--renderengine-vulkan', action='store_true',
                         help='Verify SurfaceFlinger selects Vulkan in the warm Lavapipe comparison')
     parser.add_argument('--stage', choices=('native', 'd3d', 'tls', 'game', 'all'), default='native')
@@ -832,6 +838,10 @@ def main():
         return 2
     if args.inspect_game_frames and args.stage != 'game':
         print(json.dumps({'passed': False, 'scope': 'Frame inspection requires the game stage; no lab started'}))
+        return 2
+    if args.game_frame_warmup_seconds is not None and (args.stage != 'game' or
+                                                      not 0 <= args.game_frame_warmup_seconds <= 900):
+        print(json.dumps({'passed': False, 'scope': 'Game warmup requires the game stage and 0 to 900 seconds; no lab started'}))
         return 2
     if args.renderengine_vulkan and (args.stage not in ('d3d', 'game') or args.stock_graphics or
                                     args.snapshot_control_dex is not None):
