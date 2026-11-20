@@ -43,3 +43,35 @@ def collect_boot_log(docker, cid, capture):
             "read_complete": code == 0 and not timed_out and not capped,
             "exit_code": code, "timed_out": timed_out, "output_limit_reached": capped,
             "counts": summarize_boot_log(output)}
+
+
+def docker_start_failure(stderr, exit_code, mount_targets):
+    """Keep only known engine error labels and exact lab mount targets."""
+    message = stderr.lower()
+    patterns = {
+        "oci_runtime": ("oci runtime", "failed to create shim task"),
+        "mount_setup": ("error mounting", "failed to mount", "mount through procfd", "mount src="),
+        "mount_path_missing": ("no such file or directory", "path does not exist"),
+        "mount_type_mismatch": ("not a directory", "not a file"),
+        "resource_busy": ("device or resource busy", "resource temporarily unavailable"),
+        "permission_denied": ("permission denied", "operation not permitted"),
+        "read_only_filesystem": ("read-only file system",),
+        "invalid_argument": ("invalid argument",),
+        "duplicate_resource": ("already exists", "file exists", "duplicate mount"),
+        "network_setup": ("network sandbox", "failed to create endpoint", "failed to set up container networking"),
+        "veth_pair_setup": ("veth pair", "pair interfaces"),
+        "kernel_operation_unavailable": ("operation not supported", "no such device"),
+        "device_setup": ("create device", "device cgroup", "error gathering device information"),
+        "exec_failure": ("exec: ", "executable file not found"),
+        "no_space_left": ("no space left",),
+    }
+    return {"exit_code": exit_code, "stderr_present": bool(stderr),
+            "error_categories": [name for name, phrases in patterns.items() if any(phrase in message for phrase in phrases)],
+            "mentioned_lab_mounts": [target for target in mount_targets
+                                     if re.search(fr"{re.escape(target)}(?![\w./-])", stderr)]}
+
+
+def can_retry_with_veth(failure, network_state):
+    categories = set(failure["error_categories"])
+    return ("veth_pair_setup" in categories and "kernel_operation_unavailable" in categories
+            and not network_state["veth_present"] and network_state["kernel_modprobe_setting"] == "empty")

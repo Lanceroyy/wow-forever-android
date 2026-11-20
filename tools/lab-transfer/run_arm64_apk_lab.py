@@ -466,6 +466,14 @@ def assert_no_data_mounters(docker, data, command):
             assert path != data and path not in data.parents and data not in path.parents
 
 
+def host_veth_state():
+    try:
+        setting = 'set' if Path('/proc/sys/kernel/modprobe').read_bytes().strip() else 'empty'
+    except OSError:
+        setting = 'unavailable'
+    return {'kernel_modprobe_setting': setting, 'veth_present': Path('/sys/module/veth').is_dir()}
+
+
 def installed_component_stage(docker, cid, command, bootenv, hal, args, deadline, install_progress=None):
     """Actual fixed input installs and platform loader proof before a selected stage."""
     progress = install_progress if install_progress is not None else {}
@@ -697,7 +705,36 @@ def run_lab(args):
         assert set(mounts) == {'/data', '/dev/binder', '/dev/hwbinder', '/dev/vndbinder'} | {entry['destination'] for entry in overlays}
         report['hal_overlays'] = bool(overlays)
         profile_report['phase'] = 'container_start'
-        checked(docker + ['start', cid], 30)
+        profile_report['host_network_before_start'] = host_veth_state()
+        launch = command(docker + ['start', cid], 30)
+        if launch.returncode:
+            targets = ['/data', '/dev/binder', '/dev/hwbinder', '/dev/vndbinder']
+            targets.extend(entry['destination'] for entry in overlays)
+            diagnostics = sibling('android_boot_diagnostics')
+            failure = diagnostics.docker_start_failure(launch.stderr, launch.returncode, targets)
+            profile_report['docker_start_failure'] = failure
+            profile_report['binder_devices_still_present'] = {
+                node: (binderfs / node).is_char_device() for node in ('binder', 'hwbinder', 'vndbinder')}
+            if network == 'bridge' and diagnostics.can_retry_with_veth(failure, host_veth_state()):
+                # The stock Android init may turn off module autoloading before
+                # Docker creates the first veth pair on this disposable runner.
+                module = command([modinfo, '-F', 'filename', 'veth'], 10)
+                recovery = {'veth_module_available': module.returncode == 0, 'retried_container_start': False}
+                profile_report['veth_recovery'] = recovery
+                if recovery['veth_module_available']:
+                    loaded = command([modprobe, 'veth'], 10)
+                    recovery['modprobe_exit'] = loaded.returncode
+                    recovery['host_state_after_modprobe'] = host_veth_state()
+                    if loaded.returncode == 0 and recovery['host_state_after_modprobe']['veth_present']:
+                        state = owned_container(cid)['State']
+                        assert not state['Running'] and state['Pid'] == 0
+                        launch = command(docker + ['start', cid], 30)
+                        recovery['retried_container_start'] = True
+                        recovery['retry_exit_code'] = launch.returncode
+                        if launch.returncode:
+                            recovery['retry_failure'] = diagnostics.docker_start_failure(launch.stderr, launch.returncode, targets)
+            if launch.returncode:
+                raise RuntimeError('Owned Android container start failed')
         profile_report['owned_container_started'] = True
         observe_processes()
         profile_report['phase'] = 'boot_wait'
