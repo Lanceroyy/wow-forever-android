@@ -421,13 +421,52 @@ jobs:
                   query = command(docker + ['exec', cid, '/system/bin/service', 'check', service], 10)
                   services[service] = query.returncode == 0 and query.stdout.strip() == 'Service ' + service + ': found'
               report['public_services_found'] = services
-              before_wms = time.monotonic()
-              query = command(docker + ['exec', cid, '/system/bin/timeout', '10', '/system/bin/dumpsys', 'window'], 15)
-              report['wms_query_seconds'] = round(time.monotonic() - before_wms, 3)
-              report['wms_query_exit'] = query.returncode
-              report['wms_responsive'] = query.returncode == 0 and 'WINDOW MANAGER' in query.stdout
-              report['display_enabled'] = 'mDisplayEnabled=true' in query.stdout
-              report['system_booted'] = 'mSystemBooted=true' in query.stdout
+              readiness_deadline = min(deadline - 30, time.monotonic() + 90)
+              report['readiness_samples'] = []
+              report['wms_responsive'] = report['display_enabled'] = report['system_booted'] = False
+
+              def readiness_query(args, seconds=10):
+                  remaining = readiness_deadline - time.monotonic()
+                  if remaining <= 0:
+                      raise TimeoutError()
+                  return command(docker + ['exec', cid] + args, min(seconds, remaining))
+
+              def public_boolean(text, key):
+                  values = set(re.findall(r'\b' + re.escape(key) + r'=(true|false)\b', text))
+                  return next(iter(values)) if len(values) == 1 else ('mixed' if values else 'unavailable')
+
+              while time.monotonic() < readiness_deadline:
+                  before_wms = time.monotonic()
+                  query = readiness_query(['/system/bin/timeout', '10', '/system/bin/dumpsys', 'window'], 15)
+                  report['wms_query_seconds'] = round(time.monotonic() - before_wms, 3)
+                  report['wms_query_exit'] = query.returncode
+                  report['wms_responsive'] = query.returncode == 0 and 'WINDOW MANAGER' in query.stdout
+                  report['display_enabled'] = 'mDisplayEnabled=true' in query.stdout
+                  report['system_booted'] = 'mSystemBooted=true' in query.stdout
+                  sample = {'elapsed_seconds': round(time.monotonic() - started, 3),
+                            'wms_exit': query.returncode, 'wms_responsive': report['wms_responsive'],
+                            'wms_seconds': report['wms_query_seconds'], 'fixed_wms_flags': {
+                                key: public_boolean(query.stdout, key) for key in (
+                                    'mDisplayEnabled', 'mSystemBooted', 'mBootAnimationStopped',
+                                    'mDisplayFrozen', 'mDisplayReady')}}
+                  report['readiness_samples'].append(sample)
+                  if report['wms_responsive'] and report['display_enabled'] and report['system_booted']:
+                      sample['optional_diagnostics_skipped_after_readiness'] = True
+                      break
+                  for key, allowed in (
+                      ('service.bootanim.exit', ('', '0', '1')),
+                      ('init.svc.bootanim', ('', 'running', 'stopped', 'restarting', 'stopping')),
+                  ):
+                      prop = readiness_query(['/system/bin/getprop', key])
+                      value = prop.stdout.strip() if prop.returncode == 0 else 'unavailable'
+                      sample[key] = value if value in allowed else 'unclassified'
+                  power = readiness_query(['/system/bin/timeout', '8', '/system/bin/dumpsys', 'power'], 12)
+                  sample['power_query_exit'] = power.returncode
+                  wakefulness = re.search(r'\bmWakefulness=(Awake|Asleep|Dreaming|Dozing)\b', power.stdout)
+                  screen = re.search(r'\bDisplay Power:\s*state=(ON|OFF|DOZE|DOZE_SUSPEND|VR|ON_SUSPEND)\b', power.stdout)
+                  sample['power_wakefulness'] = wakefulness[1] if wakefulness else 'unavailable'
+                  sample['power_screen_state'] = screen[1] if screen else 'unavailable'
+                  time.sleep(min(3, max(0, readiness_deadline - time.monotonic())))
               meta = owned_container(cid)
               report['container_running'] = meta['State']['Running']
               report['container_oom_killed'] = meta['State']['OOMKilled']
