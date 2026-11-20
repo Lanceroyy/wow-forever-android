@@ -254,8 +254,16 @@ jobs:
               report['matching_kernel_binder_uapi_present'] = bool(available)
               assert available
               header = available[0].resolve()
-              uapi = header.parents[2]
-              report['public_binder_uapi_sha256'] = hashlib.sha256(header.read_bytes()).hexdigest()
+              header_bytes = header.read_bytes()
+              report['public_binder_uapi_sha256'] = hashlib.sha256(header_bytes).hexdigest()
+              # Copy only the exact BinderFS contract. Other includes must use the distro's
+              # exported userspace headers, never the unexported kernel include/uapi tree.
+              own_include = work / 'uapi-include'
+              own_android = own_include / 'linux/android'
+              own_android.mkdir(parents=True)
+              own_header = own_android / 'binderfs.h'
+              own_header.write_bytes(header_bytes)
+              assert own_header.read_bytes() == header_bytes
               compiler = shutil.which('cc')
               assert compiler is not None
               source = work / 'binderfs-create.c'
@@ -294,8 +302,22 @@ jobs:
               return close(fd) == 0 ? 0 : 67;
           }
           ''')
-              checked([compiler, '-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror', '-O2',
-                       '-I', str(uapi), str(source), '-o', str(helper)], 30)
+              compiled = command([compiler, '-std=c11', '-D_GNU_SOURCE', '-Wall', '-Wextra', '-Werror', '-O2',
+                                  '-I', str(own_include), str(source), '-o', str(helper)], 30)
+              report['binder_helper_compile_exit'] = compiled.returncode
+              diagnostic = (compiled.stdout + compiled.stderr)[:65536].lower()
+              patterns = {
+                  'unexported_kernel_header_warning': r'kernel headers from user space|__exported_headers__',
+                  'static_abi_assertion': r'static assertion failed|static_assert',
+                  'missing_header': r'fatal error:.*(?:no such file|file not found)',
+                  'warning_as_error': r'all warnings being treated as errors|warnings treated as errors|\[-werror',
+                  'compiler_error': r'\berror:',
+              }
+              report['binder_helper_compile_fixed_classes'] = {
+                  key: bool(re.search(pattern, diagnostic)) for key, pattern in patterns.items()}
+              report['binder_helper_compile_unclassified_failure'] = compiled.returncode != 0 and not any(
+                  report['binder_helper_compile_fixed_classes'].values())
+              assert compiled.returncode == 0
               report['matching_uapi_helper_compiled'] = True
               report['phase'] = 'binder_mount'
               assert owned_binder_mount() is None
