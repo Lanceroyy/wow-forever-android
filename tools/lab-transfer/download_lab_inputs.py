@@ -64,7 +64,7 @@ class DraftReader:
         require(remaining > 0, "download_deadline_exceeded")
         return remaining
 
-    def request(self, url, accept, authenticated):
+    def request(self, url, accept, authenticated, *, revoke=False):
         target = urlsplit(url)
         hosts = ("api.github.com",) if authenticated else DOWNLOAD_HOSTS
         require(target.scheme == "https" and target.hostname in hosts and target.port in (None, 443)
@@ -74,11 +74,19 @@ class DraftReader:
         if authenticated:
             headers["Authorization"] = f"Bearer {self.token}"
             headers["X-GitHub-Api-Version"] = "2022-11-28"
+        if revoke:
+            require(authenticated and url == "https://api.github.com/installation/token", "unexpected_revocation_destination")
         try:
-            return self.opener.open(Request(url, headers=headers, method="GET"),
-                                    timeout=min(self.remaining(), 35))
+            return self.opener.open(Request(url, headers=headers, method="DELETE" if revoke else "GET"),
+                                    timeout=15 if revoke else min(self.remaining(), 35))
         except HTTPError as failure:
             return failure
+
+    def revoke_job_token(self):
+        with self.request("https://api.github.com/installation/token", "application/vnd.github+json",
+                          True, revoke=True) as response:
+            if response.status != 204:
+                raise InputError("job_token_revocation_unconfirmed", response.status)
 
     def release(self, release_id):
         with self.request(f"{API}/{release_id}", "application/vnd.github+json", True) as response:
@@ -154,15 +162,21 @@ def main():
     parser.add_argument("--output", type=Path, help="Fresh private directory. Omit for a manifest-only access check.")
     args = parser.parse_args()
     report = {"scope": "draft_manifest_access" if args.output is None else "verified_draft_download", "passed": False}
+    reader = None
     try:
         require(os.environ.get("GITHUB_REPOSITORY") == REPOSITORY and
                 os.environ.get("GITHUB_REPOSITORY_ID") == str(REPOSITORY_ID) and
                 os.environ.get("GITHUB_REPOSITORY_OWNER_ID") == str(OWNER_ID) and
                 os.environ.get("GITHUB_REF") == f"refs/heads/{BRANCH}", "unexpected_workflow_repository_or_ref")
+        require(os.environ.get("GITHUB_ACTIONS") == "true" and
+                os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and
+                os.environ.get("GITHUB_ACTOR_ID") == str(OWNER_ID) and
+                os.environ.get("GITHUB_WORKFLOW_REF") ==
+                f"{REPOSITORY}/.github/workflows/arm64-apk-lab.yml@refs/heads/{BRANCH}", "unexpected_workflow_invocation")
         value = os.environ.get("LAB_RELEASE_ID", "")
         require(re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None, "invalid_numeric_release_id")
-        token = os.environ.pop("LAB_JOB_TOKEN", "")
-        get_inputs(DraftReader(token), int(value), args.output)
+        reader = DraftReader(os.environ.pop("LAB_JOB_TOKEN", ""))
+        get_inputs(reader, int(value), args.output)
         report.update(passed=True, manifest_verified=True, payloads_verified=0 if args.output is None else 3)
     except InputError as failure:
         report["failure_class"] = str(failure)
@@ -170,6 +184,15 @@ def main():
             report["http_status"] = failure.status
     except (OSError, HTTPException, KeyError, TypeError, ValueError) as failure:
         report["failure_class"] = type(failure).__name__
+    finally:
+        if reader is not None:
+            try:
+                reader.revoke_job_token()
+                report["job_token_revoked"] = True
+            except (InputError, OSError, HTTPException) as failure:
+                report.update(passed=False, job_token_revoked=False, revocation_failed=True)
+                if isinstance(failure, InputError) and failure.status is not None:
+                    report["revocation_http_status"] = failure.status
     print(json.dumps(report, sort_keys=True))
     return 0 if report["passed"] else 1
 

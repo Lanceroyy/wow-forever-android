@@ -37,12 +37,22 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' && github.repository_id == '1451984864' &&
       github.actor_id == '93947654' && github.ref == 'refs/heads/security/hardening-v1'
+    permissions:
+      # GitHub returns 403 for this draft with contents:read. The downloader
+      # only reads the draft and revokes the temporary job token before exit.
+      contents: write
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
+      - name: Obtain the exact public workflow sources without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init --quiet
+          git -c credential.helper= fetch --no-tags --quiet --depth=1 \
+            https://github.com/Lanceroyy/wow-forever-android.git "$GITHUB_SHA"
+          git -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Verify built-in token can read the approved draft
         timeout-minutes: 3
         env:
@@ -53,6 +63,8 @@ jobs:
   apk-lab:
     needs: verify-draft
     if: inputs.stage == 'native' || inputs.stage == 'd3d' || inputs.stage == 'tls' || inputs.stage == 'prelogin-probes'
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -60,9 +72,15 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
+      - name: Obtain the exact public workflow sources without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init --quiet
+          git -c credential.helper= fetch --no-tags --quiet --depth=1 \
+            https://github.com/Lanceroyy/wow-forever-android.git "$GITHUB_SHA"
+          git -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Verify draft manifest and download pinned inputs
         timeout-minutes: 8
         env:

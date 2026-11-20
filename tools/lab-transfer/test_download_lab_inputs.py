@@ -66,6 +66,20 @@ class DraftDownloadTests(unittest.TestCase):
              self.assertRaisesRegex(InputError, "release_is_not_the_authorized_draft"):
             self.reader.release(123)
 
+    def test_revocation_uses_only_the_job_token_endpoint(self):
+        with patch.object(self.reader.opener, "open", return_value=Response(204)) as send:
+            self.reader.revoke_job_token()
+        revoke = send.call_args.args[0]
+        self.assertEqual(revoke.full_url, "https://api.github.com/installation/token")
+        self.assertEqual(revoke.get_method(), "DELETE")
+        self.assertEqual(revoke.get_header("Authorization"), "Bearer placeholder-for-test")
+
+    def test_revocation_redirect_is_rejected(self):
+        with patch.object(self.reader.opener, "open", return_value=Response(302)) as send, \
+             self.assertRaisesRegex(InputError, "job_token_revocation_unconfirmed"):
+            self.reader.revoke_job_token()
+        self.assertEqual(send.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
