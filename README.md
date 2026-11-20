@@ -34,7 +34,7 @@ Requirements:
 
 ### 1. Install the app
 
-Download `WoW-Forever.apk` from the [latest release](https://github.com/jaredgei/wow-forever-android/releases/latest) and install it on your device. The app's package name is `app.wowforever`, so it can sit alongside GameNative or Winlator.
+See [the hardened build and upgrade guide](SECURITY_INSTALL.md). This branch has no published APK. The package name is `app.wowforever`, which can sit alongside GameNative or Winlator.
 
 ### 2. Install the game
 
@@ -79,7 +79,7 @@ Your existing `Data/` folder is reused. The `_classic_beta_/` folder can be dele
 
 ### 3. Play
 
-Once your game files and Battle.net credentials are configured, the app automatically launches straight into the game. If credentials are not yet configured, the launcher stops at the setup screen so you can enter them before playing. The first launch downloads the ARM64 game client and installs the Windows environment, which takes a few minutes and needs an internet connection.
+Choose **Log in manually** and sign in inside the WoW client. The launcher does not collect or store your Battle.net login. The first launch may download the ARM64 game client and install the Windows environment, which needs an internet connection.
 
 - **Setup screen:** to access folder settings, forget credentials, check environment status, or view updates, hold **Start + Select + L2 + R2** (or tap the back button) during the loading splash to cancel boot and return to the setup screen.
 - The app creates a basic `WTF/Config.wtf` on first run and always sets `gxApi "D3D11"`, the renderer that works with DXVK.
@@ -91,7 +91,7 @@ Once your game files and Battle.net credentials are configured, the app automati
 - **Controller:** built-in handheld controllers work in-game. WoW's own gamepad mode handles the mapping.
 - **In-game menu:** press Back (the button or the back swipe gesture) to open the sidebar. It has **Keyboard**, on-screen controls, performance overlay and **Exit**.
 - **Keyboard:** the sidebar's **Keyboard** opens the Android keyboard. On dual-screen devices like the Thor it appears on the bottom screen. Symbols like `@` work, and so does pasting.
-- **Battle.net Auto-Login:** configure credentials directly on the launcher setup screen (**Configure Login** / **Update Login**). Credentials are saved encrypted on-device via Android Keystore. On boot, the launcher generates `_forever_/login.txt`, which the WoW client automatically reads on startup to sign in natively without macro simulation or synthetic clicks. Use **Forget Saved Login** on the launcher setup screen to clear credentials and remove the login file.
+- **Manual Battle.net sign-in:** automatic login is disabled. The old shared credential handoff is removed from the configured game root when accessible. See [upgrade steps](SECURITY_INSTALL.md) for previously exposed credentials.
   - Authenticator codes still have to be entered by hand. The game keeps running when you switch apps, so you can grab a code from an authenticator app on the same device.
 
 ---
@@ -135,7 +135,7 @@ tools/fetch_components.sh           # Wine/Proton, DXVK and Turnip archives (~13
 
 Release builds are signed with `app/keystores/keystore.properties` when it exists (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`). Otherwise they fall back to the debug key. Builds signed with different keys can't update each other, so switching between them means uninstalling first.
 
-`fetch_components.sh` downloads the three runtime archives from this repo's `components-v1` release and checks them against `tools/components.sha256`. If you already have them, pass a folder instead: `tools/fetch_components.sh /path/to/components`.
+`fetch_components.sh` downloads the four runtime archives from this repo's `components-v1` release and checks them against `tools/components.sha256`. If you already have them, pass a folder instead: `tools/fetch_components.sh /path/to/components`.
 
 ---
 
@@ -170,7 +170,7 @@ GameNative is a general game library with Steam, GOG, Epic, Amazon, EA and Rocks
 - **Native In-App Game Updater (v2.0):** Live version check against Blizzard patch services, direct-from-CDN ARM64 binary and manifest downloads, CASC index synchronization, and atomic `.build.info` updates on-device over Wi-Fi without any PC dependency.
 - **Lean runtime & startup:** eliminated continuous background accelerometer polling during gameplay in favor of native OS window management, removed cold-boot bitmap allocations, guarded background performance metric collection loops, and switched DNS to native platform resolution.
 - **Removed:** every store backend (Steam and JavaSteam, GOG, Epic, Amazon, EA, Rockstar), library, login, settings, custom game scanner, and downloads screens, ExoPlayer and browser dependencies, `DownloadService`, `ContainerMigrator`, Nexus mod management, the Meta Quest/XR build, PostHog analytics, Play Integrity, the self-updater, the Room database, the notification prompt, extra bundled Box64/FEX/DXVK versions and the legacy (Android 9) build. That's roughly 135k lines of code and about half the APK size.
-- **Tooling:** `tools/download_wow_arm64.py` fetches the ARM64 client from Blizzard's CDN, `tools/sync_wow_to_device.sh` handles updates, and `tools/fetch_components.sh` downloads the runtime archives.
+- **Tooling:** `tools/sync_wow_to_device.sh` copies local CASC data without deleting device files; use the Android launcher to install and update the ARM64 client. `tools/fetch_components.sh` downloads and verifies the four pinned runtime archives.
 
 ## License
 

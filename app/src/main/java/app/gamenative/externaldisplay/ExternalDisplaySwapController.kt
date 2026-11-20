@@ -117,7 +117,7 @@ class ExternalDisplaySwapController(
     }
 
     private fun findPresentationDisplay(): Display? {
-        val currentDisplay = context.display ?: return null
+        val currentDisplay = context.currentDisplayCompat() ?: return null
         return displayManager
             ?.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
             ?.firstOrNull { display ->
@@ -141,6 +141,7 @@ private class GamePresentation(
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
+        window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         window?.setFlags(
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,

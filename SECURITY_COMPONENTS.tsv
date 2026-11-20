@@ -1,0 +1,106 @@
+kind	path_or_url	bytes	sha256	origin_or_status
+zstd archive	app/src/main/assets/box86_64/box64-0.4.2-bionic.tzst	3519079	fcd10730ff899bad829a5e91780d8aae6350a7e152069ff2c90e93922ecad192	Pinned repository bytes; independent source/build correspondence not established
+zstd archive	app/src/main/assets/pulseaudio-gamenative-20260919.tzst	68926	e64090772d8def3347f307a1b308713664ce027532137e6afb774931f2160259	Pinned repository bytes; independent source/build correspondence not established
+zstd archive	app/src/main/assets/redirect.tzst	33179	99e578bff9884ad59ef8eec89b0df78d55103979eff8333ab4041bc3f11390ab	Pinned repository bytes; independent source/build correspondence not established
+zstd archive	app/src/main/assets/wowbox64/wowbox64-0.4.2.tzst	1030182	90e6fefea2c9189c2556d6e0661ec4325dfc41fa82413a44a2485ae223e38efd	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libahbimage.so	12776	25c2af0ff3a5180f30f937d650ccc68b4f5b5f55b48db4e45a18d73c5c784fb7	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libasurface_renderer.so	525256	4323ea6909dd70eb49a0c4f6950f1113f01a9618c3ef82087f9e8ab3e13af9e3	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libc++_shared.so	1292896	4e2dcc0b0beae5c9dcbf25d90400a4de203cbffbfae6526d4be7befa88a77c09	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libevshim.so	16216	e60e5de6fff65d2fa07cb0181d4c04d770e67efaede9bc190218b1d768c5b1b3	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libgamenative_dns_v4mapped.so	12528	3a4d0a867fc5d6dcf49ef3fd8e10cdae6cea2570941a67ec6623eb3371f5d27b	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libgnoverlay.so	67288	dc5bca53148b8c4bb621d13615d9f50d16616c193c78f5b5677dc574a1a33137	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libkgslshim.so	7520	a0616b1e7847b104783298c84d93a1d880e3513016115ae75fb512de53bab034	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/liblsfg-vk-layer.so	2624600	91faa290099f98d4fd2ec2cb0e8f0b83d44d714a31a11c2d139800e8e20bc8c7	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libltdl.so	38192	bc12038c8cedb7ba405b6621b579ad6b643e018b12f5f1d01e6cb78169e49907	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libpulse.so	331072	061a0479989dd406924c837d7a09a59f086aec122d8b636b518da1658f225052	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libpulseaudio.so	67040	c70622e9dadb31aba51b36ca6313a944e0febd8beabea5ace4b9f42ce951d350	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libpulsecommon-13.0.so	473432	febdaa6fb344775f0c980c100e33046b27c9701d24346a45890b640380147a26	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libpulsecore-13.0.so	643224	1bbfb039b159da9b6c0090e3309e6f686b1468e8a4d77b8a61612fa3af3e576a	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/main/jniLibs/arm64-v8a/libsndfile.so	476976	d6b61f5dddedce3cd29c5db9b58b5dd16a4b3faebfcbe925bc9432e2993831ee	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/assets/libredirect-bionic-wx-minimal.so	38952	557aacc4a8b9e0dccb5e6d43aecca7b1723c0095f9bcb24fc5efe0db5390ff41	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/assets/libredirect-bionic-wx.so	71080	8f50d8af131dbf1eb008b8a9e48aca110f7cbc02e787959771317dd5c5c56e26	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/jniLibs/arm64-v8a/libextras.so	354448	dfb788b7af8a6611a7dc3bb11a539803092425b0b7617ea9a65a6f95cff7fcc8	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/jniLibs/arm64-v8a/libhook_impl.so	277928	5a4569644df5d151df192f53c96ff9c1eb499dffe555e2c20c00395cc806e081	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/jniLibs/arm64-v8a/libmain_hook.so	4216	d6fb6b5cfc1c7b2e6bca4a82a9152545b91ff84f6b3575c75f83fcafe19100fb	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/jniLibs/arm64-v8a/libpatchelf.so	1147320	d230db3cac238250d514198ce318bdfa64f5ecb60aec84b79d0538c0f2dc5fa2	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/jniLibs/arm64-v8a/libvirglrenderer.so	443800	aac67504457eaeaefaf2577be31bc8a63338a31be0c0dfe4e0d77645e4b4d673	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/jniLibs/arm64-v8a/libvortekrenderer.so	2228984	d9d18ed58c410f9481c3661de188c68238be389b0cceaf0572163ada7fe8adad	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/jniLibs/arm64-v8a/libvulkan_renderer.so	1524088	e8953de4cb651210cf72c0c52b762a958015a308394bec7d8d913920947026af	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/jniLibs/arm64-v8a/libwinlator.so	26264	80c2cb220dc4e0f17d5bd21e7d92bd1ab81b13c6244ac205e821dcc6e47514f9	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/jniLibs/arm64-v8a/libwinlator_11.so	67752	ea1e6eac0aa4144e4780de210cc4618efafe541ebb4a3f8acc7a7fa97080bf9e	Pinned repository bytes; independent source/build correspondence not established
+ELF	app/src/modern/jniLibs/arm64-v8a/libxconnectorpatch.so	10784	5a49939227efde3192a8453bb8357427779a2247f24a568defd698963b9a6a76	Pinned repository bytes; independent source/build correspondence not established
+ZIP/JAR	gradle/wrapper/gradle-wrapper.jar	43583	2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046	Gradle wrapper JAR at pinned repository baseline; distribution checked separately
+fetched bundled component	app/src/main/assets/bundled_components/proton-11.0-90624-arm64ec.wcp	125790679	137807f4145b1b440075f83b2b1b3501d19c4eb618784b1a28418652cae3db03	Matched checked-in SHA-256 and GitHub release digest; source rebuild not verified
+fetched bundled component	app/src/main/assets/bundled_components/dxvk-2.4.1-wow-aarch64-test.wcp	2198864	f660b5c6422b3f93cec65664f309718942e58581b5b96fa2902d55d63ce1db8a	Matched checked-in SHA-256 and GitHub release digest; source rebuild not verified
+fetched bundled component	app/src/main/assets/bundled_components/turnip-wow-scheduler-test.zip	3307824	02384f692735515f73aad8a544bc640abe3f35fe18e8df2e667be712c442e54c	Matched checked-in SHA-256 and GitHub release digest; source rebuild not verified
+fetched bundled component	app/src/main/assets/bundled_components/turnip-V32-RP6sched.zip	3008404	05434d3c102563a4577f514410cc713494bcf900f52c2b935391adf87a76b77a	Matched checked-in SHA-256 from arusiasotto/wow-forever-a840; no independent release digest
+runtime download	https://downloads.gamenative.app/container_files/extras.tzst			Catalog: container_files_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/container_files/container_pattern_common_20260821.tzst			Catalog: container_files_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/container_files/container_pattern_gamenative.tzst			Catalog: container_files_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/container_files/proton-9.0-x86_64_container_pattern.tzst			Catalog: container_files_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/container_files/proton-9.0-arm64ec_container_pattern.tzst			Catalog: container_files_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/core_drivers/Adreno_805_adpkg.zip			Catalog: core_drivers_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/core_drivers/Adreno_819.2_adpkg.zip			Catalog: core_drivers_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/core_drivers/SD8Elite_2-842.6.zip			Catalog: core_drivers_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/core_drivers/SD8Elite_800.35.zip			Catalog: core_drivers_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/core_drivers/SD8Elite_800.51.zip			Catalog: core_drivers_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/d8vk-1.0.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/dxvk-1.9.2.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/dxvk-1.10.1.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/dxvk-1.10.3.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/dxvk-async-1.10.3.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/dxvk-1.10.9-sarek.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/dxvk-1.11.1-sarek.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/dxvk-2.4.1.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/dxvk-2.4.1-gplasync.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/dxvk-2.6.1-gplasync.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/dxvk-2.7.1.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/vkd3d-2.6.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/vkd3d-2.12.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/vkd3d-2.13.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/vkd3d-2.14.1.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/dxwrapper/vkd3d-3.0b.tzst			Catalog: dxwrapper_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/turnip-24.1.0.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/turnip-25.0.0.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/turnip-25.1.0.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/turnip-25.2.0.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/turnip-25.3.0.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/zink-22.2.5.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/virgl-23.1.9.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/vortek-2.0.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/vortek-2.1.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/adrenotools-Turnip_Gen8_V25.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/adrenotools-turnip25.1.0.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/adrenotools-turnip25.3.0_R3_Auto.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/adrenotools-turnip25.3.0_R3_Gmem.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/adrenotools-turnip25.3.0_R6_Gmem.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/adrenotools-turnip25.3.0_R11.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/adrenotools-turnip26.0.0_R4.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/adrenotools-turnip26.0.0_R8.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/adrenotools-v762.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/adrenotools-v805.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/wrapper.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/wrapper-v2.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/wrapper-gamenative-20260724.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/wrapper-legacy.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/wrapper-leegao.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/extra_libs.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/zink_dlls.tzst			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/graphics_driver/libvulkan_wrapper.tar.xz			Catalog: graphics_driver_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/direct3d.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/directsound.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/directmusic.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/directshow.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/directplay.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/vcrun2010.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/wmdecoder.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/opengl.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/openal.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/xaudio.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+runtime download	https://downloads.gamenative.app/wincomponents/ddraw.tzst			Catalog: wincomponents_download.json; no independent digest or signature
+endpoint	https://us.version.battle.net/v2/products/wowf/			TACT build and CDN catalogs
+endpoint	https://level3.ssl.blizzard.com/tpr/wow/			Blizzard CASC data and executables
+endpoint	https://us.cdn.blizzard.com/tpr/wow/			Blizzard CASC secondary
+endpoint	https://pub-9fcd5294bd0d4b85a9d73615bf98f3b5.r2.dev/			Runtime mirror
+endpoint	https://api.github.com/repos/Lanceroyy/wow-forever-android/releases/latest			Hardened APK updates
+runtime download	https://downloads.gamenative.app/imagefs_bionic.txz			Default Bionic filesystem; no independent digest or signature

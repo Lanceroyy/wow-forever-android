@@ -33,6 +33,7 @@ class PluviaApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        app.gamenative.ui.screen.wow.BattleNetSignIn.removeSavedLogin(this)
         instance = this
         android.system.Os.setenv("EVSHIM_BASE_PATH", filesDir.absolutePath, true)
 
@@ -42,7 +43,6 @@ class PluviaApp : Application() {
             Timber.plant(ReleaseTree())
         }
 
-        CrashHandler.initialize(this)
         PrefManager.init(this)
     }
 

@@ -1,0 +1,156 @@
+name: Native ARM64 APK lab
+
+"on":
+  push:
+    branches: [security/hardening-v1]
+    paths: [.github/workflows/arm64-apk-lab.yml]
+  workflow_dispatch:
+    inputs:
+      draft_release_id:
+        description: Numeric ID of the approved unpublished draft
+        type: string
+        required: true
+      stage:
+        description: Test stage
+        type: choice
+        options: [access, native, d3d, tls, game, prelogin-probes]
+        default: native
+      disable_task_snapshots:
+        description: Disable optional task snapshots in the disposable graphics lab
+        type: boolean
+        default: false
+      stock_graphics:
+        description: Compare D3D11 or WoW on stock Android graphics
+        type: boolean
+        default: false
+      inspect_game_frames:
+        description: Check login text and background pixels inside the game lab
+        type: boolean
+        default: false
+      game_frame_warmup_seconds:
+        description: Seconds to wait after the game window appears
+        type: number
+        default: 120
+      renderengine_vulkan:
+        description: Verify the Vulkan compositor on the warm Lavapipe graphics profile
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify-sources:
+    if: >-
+      github.event_name == 'push' && github.repository_id == '1451984864' &&
+      github.ref == 'refs/heads/security/hardening-v1'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Test the lab helper source
+        run: python3 -m unittest discover -s tools/lab-transfer -p 'test_*.py'
+
+  verify-draft:
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.repository_id == '1451984864' &&
+      github.actor_id == '93947654' && github.ref == 'refs/heads/security/hardening-v1'
+    permissions:
+      # GitHub returns 403 for this draft with contents:read. The downloader
+      # only reads the draft and revokes the temporary job token before exit.
+      contents: write
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - name: Obtain the exact public workflow sources without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init --quiet
+          git -c credential.helper= fetch --no-tags --quiet --depth=1 \
+            https://github.com/Lanceroyy/wow-forever-android.git "$GITHUB_SHA"
+          git -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Verify built-in token can read the approved draft
+        timeout-minutes: 3
+        env:
+          LAB_JOB_TOKEN: ${{ github.token }}
+          LAB_RELEASE_ID: ${{ inputs.draft_release_id }}
+        run: python3 -I tools/lab-transfer/download_lab_inputs.py
+
+  apk-lab:
+    needs: verify-draft
+    if: >-
+      inputs.stage == 'native' || inputs.stage == 'd3d' || inputs.stage == 'tls' ||
+      inputs.stage == 'game' || inputs.stage == 'prelogin-probes'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: ${{ fromJSON(inputs.stage == 'prelogin-probes' && '["native", "d3d", "tls"]' || format('["{0}"]', inputs.stage)) }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: ${{ matrix.stage == 'game' && 60 || 40 }}
+    steps:
+      - name: Obtain the exact public workflow sources without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init --quiet
+          git -c credential.helper= fetch --no-tags --quiet --depth=1 \
+            https://github.com/Lanceroyy/wow-forever-android.git "$GITHUB_SHA"
+          git -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Verify draft manifest and download pinned inputs
+        timeout-minutes: 8
+        env:
+          LAB_JOB_TOKEN: ${{ github.token }}
+          LAB_RELEASE_ID: ${{ inputs.draft_release_id }}
+        run: |
+          python3 -I tools/lab-transfer/download_lab_inputs.py \
+            --output "$RUNNER_TEMP/wow-native-lab-inputs"
+      - name: Install local frame inspection tools
+        if: matrix.stage == 'game' && inputs.inspect_game_frames
+        timeout-minutes: 5
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y -qq --no-install-recommends python3-pil tesseract-ocr tesseract-ocr-eng
+      - name: Run the selected checks on the exact APK
+        # The preceding download step has already revoked the repository job token.
+        shell: bash
+        env:
+          LAB_STAGE: ${{ matrix.stage }}
+          LAB_DISABLE_TASK_SNAPSHOTS: ${{ inputs.disable_task_snapshots }}
+          LAB_STOCK_GRAPHICS: ${{ inputs.stock_graphics }}
+          LAB_INSPECT_GAME_FRAMES: ${{ inputs.inspect_game_frames }}
+          LAB_GAME_FRAME_WARMUP_SECONDS: ${{ inputs.game_frame_warmup_seconds }}
+          LAB_RENDERENGINE_VULKAN: ${{ inputs.renderengine_vulkan }}
+        run: |
+          set -euo pipefail
+          inputs_dir="$RUNNER_TEMP/wow-native-lab-inputs"
+          lab_options=()
+          if [[ "$LAB_DISABLE_TASK_SNAPSHOTS" == true && ( "$LAB_STAGE" == d3d || "$LAB_STAGE" == game ) ]]; then
+            snapshot_dir="$RUNNER_TEMP/wow-snapshot-control"
+            python3 -I tools/lab-transfer/build_lab_snapshot_control.py "$snapshot_dir"
+            lab_options+=(--snapshot-control-dex "$snapshot_dir/classes.dex")
+          fi
+          if [[ "$LAB_STOCK_GRAPHICS" == true && ( "$LAB_STAGE" == d3d || "$LAB_STAGE" == game ) ]]; then
+            lab_options+=(--stock-graphics)
+          fi
+          if [[ "$LAB_INSPECT_GAME_FRAMES" == true && "$LAB_STAGE" == game ]]; then
+            lab_options+=(--inspect-game-frames)
+          fi
+          if [[ "$LAB_STAGE" == game && "$LAB_GAME_FRAME_WARMUP_SECONDS" != 120 ]]; then
+            lab_options+=(--game-frame-warmup-seconds "$LAB_GAME_FRAME_WARMUP_SECONDS")
+          fi
+          if [[ "$LAB_RENDERENGINE_VULKAN" == true && ( "$LAB_STAGE" == d3d || "$LAB_STAGE" == game ) ]]; then
+            lab_options+=(--renderengine-vulkan)
+          fi
+          sudo -n /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            /usr/bin/python3 -I "$GITHUB_WORKSPACE/tools/lab-transfer/run_arm64_apk_lab.py" \
+            --main "$inputs_dir/main.apk" \
+            --qa "$inputs_dir/qa.apk" \
+            --hal "$inputs_dir/candidate-public-build.tar.gz" \
+            --stage "$LAB_STAGE" "${lab_options[@]}"

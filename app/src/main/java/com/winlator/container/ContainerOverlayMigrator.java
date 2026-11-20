@@ -175,7 +175,8 @@ public final class ContainerOverlayMigrator {
                             return FileVisitResult.CONTINUE;
                         }
                         int links = linkCount(file);
-                        boolean prunable = (links > 1 && isLinkedInto(file, protonLibDirs))
+                        boolean linkedToProton = links != 1 && isLinkedInto(file, protonLibDirs);
+                        boolean prunable = linkedToProton
                                 || (attrs.size() == baseAttrs.size() && FileUtils.contentEquals(file.toFile(), baseFile.toFile()));
                         if (!prunable) {
                             result.filesKept++;
@@ -184,7 +185,7 @@ public final class ContainerOverlayMigrator {
                         try {
                             Files.delete(file);
                             result.filesPruned++;
-                            if (links <= 1) result.bytesFreed += attrs.size();
+                            if (!linkedToProton && links <= 1) result.bytesFreed += attrs.size();
                         }
                         catch (IOException e) {
                             result.filesKept++;
@@ -235,8 +236,9 @@ public final class ContainerOverlayMigrator {
         try {
             return ((Number) Files.getAttribute(file, "unix:nlink", LinkOption.NOFOLLOW_LINKS)).intValue();
         }
-        catch (Throwable t) {
-            return 1;
+        catch (IOException | UnsupportedOperationException | IllegalArgumentException e) {
+            // A missing attribute does not establish that the file has only one link.
+            return -1;
         }
     }
 }

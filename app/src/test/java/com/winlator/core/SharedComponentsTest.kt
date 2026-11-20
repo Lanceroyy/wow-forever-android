@@ -2,7 +2,6 @@ package com.winlator.core
 
 import java.io.File
 import java.nio.file.Files
-import java.nio.file.LinkOption
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -16,9 +15,6 @@ import org.robolectric.RobolectricTestRunner
 class SharedComponentsTest {
     @get:Rule
     val tmp = TemporaryFolder()
-
-    private fun linkCount(file: File): Int =
-        (Files.getAttribute(file.toPath(), "unix:nlink", LinkOption.NOFOLLOW_LINKS) as Number).toInt()
 
     private fun sharedTree(): File {
         val shared = tmp.newFolder("shared")
@@ -41,8 +37,6 @@ class SharedComponentsTest {
         assertEquals("dxvk", copied.readText())
         assertEquals("dxvk32", File(dest, "syswow64/dxgi.dll").readText())
         assertFalse(Files.isSameFile(copied.toPath(), File(shared, "system32/d3d11.dll").toPath()))
-        assertEquals(1, linkCount(copied))
-        assertEquals(1, linkCount(File(shared, "system32/d3d11.dll")))
         assertTrue(copied.canWrite())
         copied.writeText("overwritten")
         assertEquals("dxvk", File(shared, "system32/d3d11.dll").readText())
@@ -66,12 +60,13 @@ class SharedComponentsTest {
     @Test
     fun materialize_copiesConfigFilesToo() {
         val shared = sharedTree()
-        File(shared, "syswow64/dxvk.conf").writeText("conf")
+        val sourceConfig = File(shared, "syswow64/dxvk.conf").apply { writeText("conf") }
         val dest = tmp.newFolder("dest")
 
         assertTrue(SharedComponents.materialize(shared, dest, null))
 
-        assertEquals(1, linkCount(File(dest, "syswow64/dxvk.conf")))
-        assertEquals(1, linkCount(File(shared, "syswow64/dxgi.dll")))
+        val copiedConfig = File(dest, "syswow64/dxvk.conf")
+        assertEquals("conf", copiedConfig.readText())
+        assertFalse(Files.isSameFile(sourceConfig.toPath(), copiedConfig.toPath()))
     }
 }

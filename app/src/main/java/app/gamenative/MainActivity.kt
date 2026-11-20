@@ -90,6 +90,8 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
+        // Manual Battle.net sign-in takes place in the guest rendered in this window.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
 
         // stale keepAlive from a prior crash/swipe — no container is actually running
         if (PluviaApp.keepAlive && PluviaApp.xEnvironment == null) {
